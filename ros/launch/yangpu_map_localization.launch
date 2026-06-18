@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- 全局 PCD 地图路径。 -->
+  <arg name="map_path" default="/home/guoli/data/yangpu/loc/global_downsampled_0.5.pcd"/>
+  <!-- 输入融合点云话题；用户手动 rosbag play 后节点订阅这个话题。 -->
+  <arg name="cloud_topic" default="/lidar_preprocessor/meta_cloud"/>
+  <!-- INS/组合导航话题；第一帧作为初始化，后续作为评估参考。 -->
+  <arg name="ins_topic" default="/localization/ins"/>
+  <!-- 节点实时写出的 CSV 文件，记录 ICP/INS/误差。 -->
+  <arg name="output_csv" default="/tmp/yangpu_loc_genz_icp.csv"/>
+  <!-- 运行时间限制；0.0 表示不截断，完整处理。 -->
+  <arg name="duration" default="0.0"/>
+  <!-- 地图裁剪半径；在线模式会以第一帧 INS 为圆心裁剪，loc 包建议先用 220m。 -->
+  <arg name="map_radius" default="220.0"/>
+  <!-- 地图体素大小，影响地图密度和内存。 -->
+  <arg name="map_voxel" default="0.6"/>
+  <!-- 当前帧点云体素大小，影响 ICP 速度和精度。 -->
+  <arg name="scan_voxel" default="0.6"/>
+  <!-- ICP 最大对应距离。 -->
+  <arg name="max_corr" default="2.0"/>
+  <!-- ICP 鲁棒核参数。 -->
+  <arg name="kernel" default="0.7"/>
+  <!-- 是否打开 RViz。 -->
+  <arg name="rviz" default="true"/>
+  <!-- 是否录评估 bag；只录 odometry 和 INS，不录点云。 -->
+  <arg name="record" default="true"/>
+  <!-- 评估 bag 输出路径。 -->
+  <arg name="record_bag" default="/home/guoli/data/yangpu/loc/yangpu_loc_genz_icp_eval2.bag"/>
+
+  <!-- 在线地图定位节点：只订阅话题，不读取 bag，也不 rosbag play。 -->
+  <node pkg="genz_icp" type="yangpu_map_localization" name="yangpu_map_localization" output="screen"
+        args="--online
+              --map $(arg map_path)
+              --cloud-topic $(arg cloud_topic)
+              --ins-topic $(arg ins_topic)
+              --output $(arg output_csv)
+              --duration $(arg duration)
+              --map-radius $(arg map_radius)
+              --map-voxel $(arg map_voxel)
+              --scan-voxel $(arg scan_voxel)
+              --max-corr $(arg max_corr)
+              --kernel $(arg kernel)
+              --publish
+              --no-ins-prediction"/>
+
+  <!-- 可选启动 RViz，用于观察全局地图、配准点云、轨迹和当前位姿。 -->
+  <group if="$(arg rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find genz_icp)/rviz/yangpu_map_localization.rviz"/>
+  </group>
+
+  <!-- 可选录制评估 bag；不要录点云，否则文件会非常大。 -->
+  <group if="$(arg record)">
+    <node pkg="rosbag" type="record" name="yangpu_eval_recorder" output="screen"
+          args="-O $(arg record_bag)
+                /yangpu_genz/odometry
+                /localization/ins"/>
+  </group>
+</launch>

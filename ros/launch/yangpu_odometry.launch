@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Yangpu 融合点云话题；对应 OdometryServer.cpp 里的 pointcloud_topic remap。 -->
+  <arg name="topic" default="/lidar_preprocessor/meta_cloud"/>
+  <!-- 输出里程计坐标系。 -->
+  <arg name="odom_frame" default="odom"/>
+  <!-- meta_cloud 已经是 base_link 坐标系，base_frame 留空表示直接使用点云 frame。 -->
+  <arg name="base_frame" default=""/>
+  <!-- 是否发布 odom->base_link / odom->点云frame 的 TF。 -->
+  <arg name="publish_odom_tf" default="true"/>
+  <!-- 是否打开 RViz，并发布局部地图/平面点/非平面点等调试点云。 -->
+  <arg name="visualize" default="true"/>
+
+  <!-- GenZ-ICP 参数：这里用 outdoor 作为 Yangpu 室外场景初始参数。 -->
+  <arg name="config_file" default="outdoor.yaml"/>
+  <!-- 是否录评估 bag；只录里程计和 INS，不录点云。 -->
+  <arg name="record" default="true"/>
+  <!-- 评估 bag 输出路径。 -->
+  <arg name="record_bag" default="/home/guoli/data/yangpu/A203/genz_odometry_eval2.bag"/>
+
+  <!-- 调用原始 OdometryServer.cpp 编译出的 odometry_node，不播放 bag。 -->
+  <include file="$(find genz_icp)/launch/odometry.launch">
+    <arg name="topic" value="$(arg topic)"/>
+    <arg name="odom_frame" value="$(arg odom_frame)"/>
+    <arg name="base_frame" value="$(arg base_frame)"/>
+    <arg name="publish_odom_tf" value="$(arg publish_odom_tf)"/>
+    <arg name="visualize" value="$(arg visualize)"/>
+    <arg name="config_file" value="$(arg config_file)"/>
+  </include>
+
+  <!-- 评估用录包：/genz/odometry 是原始 GenZ-ICP 里程计，/localization/ins 是参考。 -->
+  <group if="$(arg record)">
+    <node pkg="rosbag" type="record" name="genz_odometry_eval_recorder" output="screen"
+          args="-O $(arg record_bag)
+                /genz/odometry
+                /localization/ins"/>
+  </group>
+</launch>
