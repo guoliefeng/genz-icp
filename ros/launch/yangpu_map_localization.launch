@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <launch>
   <!-- 全局 PCD 地图路径。 -->
-  <arg name="map_path" default="/home/guoli/data/yangpu/loc/global_downsampled_0.5.pcd"/>
+  <arg name="map_path" default="/home/guoli/data/yangpu/loc/map.pcd"/>
   <!-- 输入融合点云话题；用户手动 rosbag play 后节点订阅这个话题。 -->
   <arg name="cloud_topic" default="/lidar_preprocessor/meta_cloud"/>
   <!-- INS/组合导航话题；第一帧作为初始化，后续作为评估参考。 -->
@@ -11,7 +11,9 @@
   <!-- 运行时间限制；0.0 表示不截断，完整处理。 -->
   <arg name="duration" default="0.0"/>
   <!-- 地图裁剪半径；在线模式会以第一帧 INS 为圆心裁剪，loc 包建议先用 220m。 -->
-  <arg name="map_radius" default="220.0"/>
+  <arg name="map_radius" default="160.0"/>
+  <!-- rolling local_map 清理半径；用于发布 /genz_loc/local_map。 -->
+  <arg name="local_map_radius" default="80.0"/>
   <!-- 地图体素大小，影响地图密度和内存。 -->
   <arg name="map_voxel" default="0.6"/>
   <!-- 当前帧点云体素大小，影响 ICP 速度和精度。 -->
@@ -20,6 +22,8 @@
   <arg name="max_corr" default="2.0"/>
   <!-- ICP 鲁棒核参数。 -->
   <arg name="kernel" default="0.7"/>
+  <!-- 是否启用 INS 帧间预测；false 时首帧仍用 INS，后续使用 ICP 恒速预测。 -->
+  <arg name="use_ins_prediction" default="false"/>
   <!-- 是否打开 RViz。 -->
   <arg name="rviz" default="true"/>
   <!-- 是否录评估 bag；只录 odometry 和 INS，不录点云。 -->
@@ -36,12 +40,13 @@
               --output $(arg output_csv)
               --duration $(arg duration)
               --map-radius $(arg map_radius)
+              --local-map-radius $(arg local_map_radius)
               --map-voxel $(arg map_voxel)
               --scan-voxel $(arg scan_voxel)
               --max-corr $(arg max_corr)
               --kernel $(arg kernel)
-              --publish
-              --no-ins-prediction"/>
+              --use-ins-prediction $(arg use_ins_prediction)
+              --publish"/>
 
   <!-- 可选启动 RViz，用于观察全局地图、配准点云、轨迹和当前位姿。 -->
   <group if="$(arg rviz)">
@@ -52,7 +57,7 @@
   <group if="$(arg record)">
     <node pkg="rosbag" type="record" name="yangpu_eval_recorder" output="screen"
           args="-O $(arg record_bag)
-                /yangpu_genz/odometry
+                /genz_loc/odometry
                 /localization/ins"/>
   </group>
 </launch>

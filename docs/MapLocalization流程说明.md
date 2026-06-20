@@ -1,16 +1,16 @@
-# YangpuMapLocalization.cpp 流程说明
+# Loc_Map.cpp 流程说明
 
-这份文档专门说明 `ros/tools/YangpuMapLocalization.cpp` 的流程。它是为杨浦数据集写的地图定位验证工具，核心目标是：把实时 LiDAR 点云配准到已有 PCD 地图上，输出车辆在 `map` 坐标系下的定位结果，并用 `/localization/ins` 做初始化、轨迹对比和误差评估。
+这份文档专门说明 `ros/tools/Loc_Map.cpp` 的流程。它是为杨浦数据集写的地图定位验证工具，核心目标是：把实时 LiDAR 点云配准到已有 PCD 地图上，输出车辆在 `map` 坐标系下的定位结果，并用 `/localization/ins` 做初始化、轨迹对比和误差评估。
 
 对应文件：
 
-- `ros/tools/YangpuMapLocalization.cpp`
+- `ros/tools/Loc_Map.cpp`
 - `ros/launch/yangpu_map_localization.launch`
 - `ros/rviz/yangpu_map_localization.rviz`
 
 ## 1. 一句话理解
 
-`YangpuMapLocalization.cpp` 做的是 scan-to-global-map localization：
+`Loc_Map.cpp` 做的是 scan-to-global-map localization：
 
 ```text
 输入：
@@ -19,20 +19,21 @@
   3. /lidar_preprocessor/meta_cloud
 
 处理：
-  点云预处理 -> 用 INS/上一帧 ICP 给初值 -> GenZ-ICP scan-to-map 配准
+  点云预处理 -> 预测位姿 -> scan-to-global-map 观测更新 -> 更新 rolling local_map
 
 输出：
-  /yangpu_genz/odometry
-  /yangpu_genz/trajectory
-  /yangpu_genz/ins_trajectory
-  /yangpu_genz/global_map
-  /yangpu_genz/aligned_scan
-  /yangpu_genz/planar_points
-  /yangpu_genz/non_planar_points
+  /genz_loc/odometry
+  /genz_loc/trajectory
+  /genz_loc/ins_trajectory
+  /genz_loc/global_map
+  /genz_loc/local_map
+  /genz_loc/aligned_scan
+  /genz_loc/planar_points
+  /genz_loc/non_planar_points
   CSV 误差文件
 ```
 
-它和原始 `OdometryServer.cpp` 的主要区别是：`OdometryServer.cpp` 是连续点云里程计，会维护局部地图；`YangpuMapLocalization.cpp` 是拿外部 PCD 当固定全局地图，每帧点云都对齐到这张地图。
+它和原始 `OdometryServer.cpp` 的主要区别是：`OdometryServer.cpp` 是连续点云里程计，局部地图同时作为匹配地图；`Loc_Map.cpp` 是拿外部 PCD 当固定全局地图做定位，每帧点云都对齐到这张地图，同时额外维护一张 rolling `local_map` 用于 RViz 观察局部建图和轨迹连续性。
 
 ## 2. 总体流程图
 
@@ -46,9 +47,9 @@ flowchart TD
     E --> F["第一帧 INS 到来"]
     F --> G["InitializeMapFromIns"]
     G --> H["LoadMap<br/>读取 PCD + 半径裁剪 + 体素化"]
-    H --> I["发布 /yangpu_genz/global_map"]
+    H --> I["发布 /genz_loc/global_map"]
     I --> J["等待 /lidar_preprocessor/meta_cloud"]
-    J --> K["CloudCallback<br/>单帧点云配准"]
+    J --> K["CloudCallback<br/>预测 + 观测更新 + local_map 更新"]
     K --> J
 
     C -- 否 --> L["离线模式<br/>ExpandGlob 找 bag"]
@@ -84,7 +85,15 @@ launch 会启动：
 注意：launch 不会自动播放 bag。bag 需要你手动播放：
 
 ```bash
-rosbag play /home/guoli/data/yangpu/loc/merged_bag.bag --clock
+cd /home/guoli/data/yangpu/A203/A203
+rosbag play 2026-06-03-1*.bag
+```
+
+如果只想快速测试 100 秒：
+
+```bash
+cd /home/guoli/data/yangpu/A203/A203
+rosbag play -u 100 2026-06-03-1*.bag
 ```
 
 ### 3.2 构造 `OnlineMapLocalizer`
@@ -101,13 +110,14 @@ rosbag play /home/guoli/data/yangpu/loc/merged_bag.bag --clock
 
 | 话题 | 类型 | 作用 |
 | --- | --- | --- |
-| `/yangpu_genz/global_map` | `sensor_msgs/PointCloud2` | 发布裁剪/体素化后的地图 |
-| `/yangpu_genz/aligned_scan` | `sensor_msgs/PointCloud2` | 发布配准到地图坐标系后的当前帧点云 |
-| `/yangpu_genz/planar_points` | `sensor_msgs/PointCloud2` | 发布参与点到面约束的平面点 |
-| `/yangpu_genz/non_planar_points` | `sensor_msgs/PointCloud2` | 发布参与点到点约束的非平面点 |
-| `/yangpu_genz/odometry` | `nav_msgs/Odometry` | 发布 GenZ-ICP 地图定位结果 |
-| `/yangpu_genz/trajectory` | `nav_msgs/Path` | 发布 GenZ-ICP 累计轨迹 |
-| `/yangpu_genz/ins_trajectory` | `nav_msgs/Path` | 发布 INS 参考轨迹 |
+| `/genz_loc/global_map` | `sensor_msgs/PointCloud2` | 发布裁剪/体素化后的地图 |
+| `/genz_loc/local_map` | `sensor_msgs/PointCloud2` | 发布 rolling 局部地图，保存当前轨迹附近已配准 scan 点 |
+| `/genz_loc/aligned_scan` | `sensor_msgs/PointCloud2` | 发布配准到地图坐标系后的当前帧点云 |
+| `/genz_loc/planar_points` | `sensor_msgs/PointCloud2` | 发布参与点到面约束的平面点 |
+| `/genz_loc/non_planar_points` | `sensor_msgs/PointCloud2` | 发布参与点到点约束的非平面点 |
+| `/genz_loc/odometry` | `nav_msgs/Odometry` | 发布 GenZ-ICP 地图定位结果 |
+| `/genz_loc/trajectory` | `nav_msgs/Path` | 发布 GenZ-ICP 累计轨迹 |
+| `/genz_loc/ins_trajectory` | `nav_msgs/Path` | 发布 INS 参考轨迹 |
 
 ## 4. INS 回调流程
 
@@ -118,13 +128,13 @@ flowchart TD
     A["收到 /localization/ins"] --> B["OdomToSophus<br/>ROS Odometry 转 SE3"]
     B --> C["更新 latest_ins_"]
     C --> D["追加到 ins_path_msg_"]
-    D --> E["发布 /yangpu_genz/ins_trajectory"]
+    D --> E["发布 /genz_loc/ins_trajectory"]
     E --> F{是否第一帧 INS}
     F -- 否 --> G["结束<br/>等待下一帧消息"]
     F -- 是 --> H["打印初始 xyz/yaw"]
     H --> I["InitializeMapFromIns"]
     I --> J["LoadMap"]
-    J --> K["发布 /yangpu_genz/global_map"]
+    J --> K["发布 /genz_loc/global_map"]
 ```
 
 第一帧 INS 非常关键，因为它有两个作用：
@@ -183,38 +193,59 @@ flowchart TD
     F --> G["PointCloud2ToEigen<br/>ROS 点云转 Eigen 点"]
     G --> H["Preprocess<br/>按 min/max range 裁剪"]
     H --> I["VoxelDownsample<br/>当前帧体素降采样"]
-    I --> J["生成 initial_guess"]
-    J --> K["Registration::RegisterFrame<br/>scan-to-map ICP"]
-    K --> L["发布 odometry/path/aligned_scan"]
-    L --> M["发布 planar/non_planar debug points"]
-    M --> N["计算 ICP vs INS 误差"]
-    N --> O["写 CSV"]
-    O --> P["保存 previous_icp_ / previous_ins_"]
+    I --> J["PredictPose<br/>生成 initial_guess"]
+    J --> K["Registration::RegisterFrame<br/>scan-to-global-map 观测更新"]
+    K --> L["local_map_.Update(source, pose)"]
+    L --> M["发布 odometry/path/local_map/aligned_scan"]
+    M --> N["发布 planar/non_planar debug points"]
+    N --> O["计算 ICP vs INS 误差"]
+    O --> P["写 CSV"]
+    P --> Q["保存 previous_icp_ / previous_ins_"]
 ```
 
-### 6.1 初值策略
+### 6.1 预测策略
 
-初值生成逻辑如下：
+预测函数是 `PredictPose()`，它给 scan-to-map ICP 提供 `initial_guess`：
 
 ```mermaid
 flowchart TD
     A["准备 initial_guess"] --> B["默认使用当前 latest_ins_"]
     B --> C{是否已有 previous_icp_}
     C -- 否 --> D["第一帧 ICP<br/>使用当前 INS"]
-    C -- 是 --> E["使用上一帧 ICP 位姿"]
-    E --> F{use_ins_prediction<br/>且 previous_ins_ 存在}
-    F -- 否 --> G["初值 = previous_icp_"]
-    F -- 是 --> H["delta_ins = previous_ins^-1 * latest_ins"]
-    H --> I["初值 = previous_icp_ * delta_ins"]
+    C -- 是 --> E{use_ins_prediction<br/>且 previous_ins_ 存在}
+    E -- 是 --> F["delta_ins = previous_ins^-1 * latest_ins"]
+    F --> G["初值 = previous_icp_ * delta_ins"]
+    E -- 否 --> H{ICP 历史是否至少 2 帧}
+    H -- 是 --> I["delta_icp = pose[N-2]^-1 * pose[N-1]"]
+    I --> J["初值 = pose[N-1] * delta_icp"]
+    H -- 否 --> K["初值 = previous_icp_"]
 ```
 
-当前 launch 中使用了 `--no-ins-prediction`，也就是：
+`initial_guess` 的第一帧永远由 INS 提供。后续预测由 launch 参数 `use_ins_prediction` 控制。
+
+当 `use_ins_prediction:=true` 时：
 
 - 第一帧使用 INS。
-- 后续默认使用上一帧 ICP。
-- 不叠加 INS 帧间增量。
+- 后续以上一帧 ICP 为基准。
+- 如果有上一帧 INS，则计算 `delta_ins = previous_ins^-1 * latest_ins`。
+- 当前预测位姿为 `previous_icp * delta_ins`。
 
-这样做的好处是评估时更能看出 ICP 自身是否稳定；坏处是如果某一帧 ICP 跳了，后续可能跟着偏。
+当 `use_ins_prediction:=false` 时：
+
+- 第一帧仍然使用 INS。
+- 后续不再使用 INS 帧间增量。
+- 预测方式改为和 `OdometryServer.cpp` / `GenZICP::GetPredictionModel()` 一样的 ICP 恒速模型：
+
+```cpp
+delta_icp = pose_history[N - 2].inverse() * pose_history[N - 1];
+initial_guess = pose_history[N - 1] * delta_icp;
+```
+
+launch 中可以这样关闭 INS prediction：
+
+```bash
+roslaunch genz_icp yangpu_map_localization.launch use_ins_prediction:=false
+```
 
 ### 6.2 配准调用
 
@@ -244,18 +275,43 @@ registration_.RegisterFrame(source,
 
 `planar_points` 和 `non_planar_points` 不是原始整帧点云，而是成功找到地图对应关系并参与优化的调试点。它们可以用来判断这一帧 ICP 有没有足够的几何约束。
 
+### 6.3 local_map 更新
+
+`Loc_Map.cpp` 的匹配目标始终是固定的 `global_map_`，也就是从 PCD 构建的地图。`local_map_` 不参与全局定位匹配，它的作用是调试和可视化。
+
+观测更新完成后会执行：
+
+```cpp
+local_map_.Update(source, pose);
+```
+
+这一步会：
+
+1. 用最终 `pose` 把当前帧 `source` 从车体坐标系变换到 `map` 坐标系。
+2. 把变换后的点写入 rolling `VoxelHashMap`。
+3. 按 `local_map_radius` 清理离当前位姿太远的点。
+4. 发布 `/genz_loc/local_map`。
+
+这样 RViz 里可以同时看：
+
+- `global_map`：固定 PCD 地图。
+- `aligned_scan`：当前帧匹配结果。
+- `local_map`：沿轨迹滚动累积的局部点云。
+- `trajectory` 和 `ins_trajectory`：ICP 与 INS 两条轨迹。
+
 ## 7. 发布与记录
 
 单帧 ICP 完成后会发布：
 
 | 输出 | 说明 |
 | --- | --- |
-| `/yangpu_genz/odometry` | 当前帧 ICP 位姿，evo 评估主要看它 |
-| `/yangpu_genz/trajectory` | ICP 累计轨迹，RViz 中红色 |
-| `/yangpu_genz/ins_trajectory` | INS 累计轨迹，RViz 中黄色 |
-| `/yangpu_genz/aligned_scan` | 用 ICP pose 变换到 map 下的当前帧点云 |
-| `/yangpu_genz/planar_points` | 平面约束点，RViz 中绿色 |
-| `/yangpu_genz/non_planar_points` | 非平面约束点，RViz 中橙色 |
+| `/genz_loc/odometry` | 当前帧 ICP 位姿，evo 评估主要看它 |
+| `/genz_loc/trajectory` | ICP 累计轨迹，RViz 中红色 |
+| `/genz_loc/ins_trajectory` | INS 累计轨迹，RViz 中亮青色 |
+| `/genz_loc/local_map` | rolling 局部地图，RViz 中黄色 |
+| `/genz_loc/aligned_scan` | 用 ICP pose 变换到 map 下的当前帧点云 |
+| `/genz_loc/planar_points` | 平面约束点，RViz 中绿色 |
+| `/genz_loc/non_planar_points` | 非平面约束点，RViz 中橙色 |
 
 CSV 每帧写一行：
 
@@ -303,17 +359,18 @@ flowchart TD
 
 ## 9. 和 OdometryServer.cpp 的关系
 
-| 对比项 | YangpuMapLocalization.cpp | OdometryServer.cpp |
+| 对比项 | Loc_Map.cpp | OdometryServer.cpp |
 | --- | --- | --- |
 | 任务 | 全局地图定位 | LiDAR 里程计 |
 | 地图 | 外部 PCD 固定地图 | 在线维护局部地图 |
-| 初值 | 第一帧 INS，后续上一帧 ICP 或 INS prediction | 内部运动模型 |
+| 初值 | 第一帧 INS，后续 INS prediction 或 ICP 恒速模型 | 内部运动模型 |
+| local_map | 维护 rolling local_map，但不作为匹配目标 | 维护 local_map，并作为 odometry 匹配目标 |
 | 输出坐标系 | `map` | 通常是 `odom` |
 | 是否会累计漂移 | 如果地图有效，理论上不应长期累计漂移 | 会随着里程计运行累计漂移 |
 | 主要评估方式 | 和 `/localization/ins` 用 evo/CSV 对比 | 看相对轨迹和局部一致性 |
-| 调试点云 | `/yangpu_genz/planar_points`、`/yangpu_genz/non_planar_points` | `/genz/planar_points`、`/genz/non_planar_points` |
+| 调试点云 | `/genz_loc/planar_points`、`/genz_loc/non_planar_points` | `/genz/planar_points`、`/genz/non_planar_points` |
 
-简单说：`OdometryServer.cpp` 是原项目的通用里程计入口；`YangpuMapLocalization.cpp` 是为杨浦数据集和全局 PCD 地图验证定制的工具。
+简单说：`OdometryServer.cpp` 是原项目的通用里程计入口；`Loc_Map.cpp` 是为杨浦数据集和全局 PCD 地图验证定制的工具。
 
 ## 10. 常见问题与排查
 
@@ -325,7 +382,7 @@ flowchart TD
 
 ```bash
 rostopic echo -n 1 /localization/ins
-rostopic echo -n 1 /yangpu_genz/global_map
+rostopic echo -n 1 /genz_loc/global_map
 ```
 
 ### 10.2 地图像一个圆圈，车辆开出去后漂移
@@ -368,14 +425,14 @@ roslaunch genz_icp yangpu_map_localization.launch map_radius:=0.0
 
 录包时不要录点云，文件会很大。launch 默认只录：
 
-- `/yangpu_genz/odometry`
+- `/genz_loc/odometry`
 - `/localization/ins`
 
 常用 XY APE：
 
 ```bash
 evo_ape bag /home/guoli/data/yangpu/loc/yangpu_loc_genz_icp_eval2.bag \
-  /localization/ins /yangpu_genz/odometry \
+  /localization/ins /genz_loc/odometry \
   -r trans_part --project_to_plane xy --t_max_diff 0.05 --plot
 ```
 
@@ -383,7 +440,7 @@ evo_ape bag /home/guoli/data/yangpu/loc/yangpu_loc_genz_icp_eval2.bag \
 
 ```bash
 evo_traj bag /home/guoli/data/yangpu/loc/yangpu_loc_genz_icp_eval2.bag \
-  /localization/ins /yangpu_genz/odometry \
+  /localization/ins /genz_loc/odometry \
   --ref /localization/ins --plot
 ```
 

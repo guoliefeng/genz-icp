@@ -6,6 +6,7 @@ Panels:
       Expanded:
         - /Global Options1
         - /Yangpu Global Map1
+        - /Yangpu Local Map1
         - /Aligned Scan1
         - /Planar Points1
         - /Non-Planar Points1
@@ -38,7 +39,7 @@ Visualization Manager:
       Plane Cell Count: 40
       Reference Frame: <Fixed Frame>
       Value: true
-    - Alpha: 1
+    - Alpha: 0.10000000149011612
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
         Max Value: 10
@@ -61,7 +62,35 @@ Visualization Manager:
       Size (Pixels): 3
       Size (m): 0.11999999731779099
       Style: Points
-      Topic: /yangpu_genz/global_map
+      Topic: /genz_loc/global_map
+      Unreliable: false
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 0.10000000149011612
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: z
+      Class: rviz/PointCloud2
+      Color: 255; 210; 70
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Min Color: 0; 0; 0
+      Name: Yangpu Local Map
+      Position Transformer: XYZ
+      Queue Size: 2
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.10000000149011612
+      Style: Points
+      Topic: /genz_loc/local_map
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -89,7 +118,7 @@ Visualization Manager:
       Size (Pixels): 3
       Size (m): 0.11999999731779099
       Style: Points
-      Topic: /yangpu_genz/aligned_scan
+      Topic: /genz_loc/aligned_scan
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -117,7 +146,7 @@ Visualization Manager:
       Size (Pixels): 5
       Size (m): 0.15000000596046448
       Style: Points
-      Topic: /yangpu_genz/planar_points
+      Topic: /genz_loc/planar_points
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -145,7 +174,7 @@ Visualization Manager:
       Size (Pixels): 5
       Size (m): 0.15000000596046448
       Style: Points
-      Topic: /yangpu_genz/non_planar_points
+      Topic: /genz_loc/non_planar_points
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -171,31 +200,31 @@ Visualization Manager:
       Radius: 0.029999999329447746
       Shaft Diameter: 0.10000000149011612
       Shaft Length: 0.10000000149011612
-      Topic: /yangpu_genz/trajectory
+      Topic: /genz_loc/trajectory
       Unreliable: false
       Value: true
-    - Alpha: 1
-      Buffer Length: 1
+    - Alpha: 2
+      Buffer Length: 2
       Class: rviz/Path
-      Color: 255; 220; 0
+      Color: 0; 255; 0
       Enabled: true
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
       Line Style: Lines
-      Line Width: 0.07999999821186066
+      Line Width: 0.10999999940395355
       Name: INS Trajectory
       Offset:
         X: 0
         Y: 0
-        Z: 0.6000000238418579
-      Pose Color: 255; 220; 0
+        Z: 0.800000011920929
+      Pose Color: 0; 220; 255
       Pose Style: None
-      Queue Size: 10
+      Queue Size: 100
       Radius: 0.029999999329447746
       Shaft Diameter: 0.10000000149011612
       Shaft Length: 0.10000000149011612
-      Topic: /yangpu_genz/ins_trajectory
+      Topic: /genz_loc/ins_trajectory
       Unreliable: false
       Value: true
     - Angle Tolerance: 0.10000000149011612
@@ -230,7 +259,7 @@ Visualization Manager:
         Shaft Length: 1
         Shaft Radius: 0.05000000074505806
         Value: Arrow
-      Topic: /yangpu_genz/odometry
+      Topic: /genz_loc/odometry
       Unreliable: false
       Value: true
   Enabled: true
@@ -258,7 +287,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 97.5646743774414
+      Distance: 68.50682067871094
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -266,9 +295,9 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 234.0751190185547
-        Y: -104.74183654785156
-        Z: -0.2509430944919586
+        X: 189.7718505859375
+        Y: -79.87767028808594
+        Z: 2.1966562271118164
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false

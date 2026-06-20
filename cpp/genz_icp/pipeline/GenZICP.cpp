@@ -54,6 +54,12 @@ GenZICP::Vector3dVectorTuple GenZICP::RegisterFrame(const std::vector<Eigen::Vec
     return RegisterFrame(deskew_frame);
 }
 
+void GenZICP::SetInitialPose(const Sophus::SE3d &pose) {
+    poses_.clear();
+    poses_.push_back(pose);
+    local_map_.Clear();
+}
+
 GenZICP::Vector3dVectorTuple GenZICP::RegisterFrame(const std::vector<Eigen::Vector3d> &frame) {
     // Preprocess the input cloud
     const auto &cropped_frame = Preprocess(frame, config_.max_range, config_.min_range);

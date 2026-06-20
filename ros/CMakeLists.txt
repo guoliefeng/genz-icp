@@ -64,8 +64,13 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   target_include_directories(odometry_node PUBLIC include ${catkin_INCLUDE_DIRS})
   target_link_libraries(odometry_node genz_icp::pipeline ${catkin_LIBRARIES})
 
+  add_executable(loc_lo_node ros1/Loc_LO.cpp)
+  target_compile_features(loc_lo_node PUBLIC cxx_std_20)
+  target_include_directories(loc_lo_node PUBLIC include ${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/ros1)
+  target_link_libraries(loc_lo_node genz_icp::pipeline ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
   # Offline Yangpu map-localization validation tool
-  add_executable(yangpu_map_localization tools/YangpuMapLocalization.cpp)
+  add_executable(yangpu_map_localization tools/Loc_Map.cpp)
   target_compile_features(yangpu_map_localization PUBLIC cxx_std_20)
   target_include_directories(yangpu_map_localization PUBLIC include ${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(yangpu_map_localization genz_icp::core ${catkin_LIBRARIES} ${PCL_LIBRARIES})
@@ -77,6 +82,7 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   target_link_libraries(pcd_downsample ${PCL_LIBRARIES})
 
   install(TARGETS odometry_node RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+  install(TARGETS loc_lo_node RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(TARGETS yangpu_map_localization RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(TARGETS pcd_downsample RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(DIRECTORY launch DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

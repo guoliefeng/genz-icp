@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- 输入融合点云话题；节点只订阅，不播放 bag。 -->
+  <arg name="topic" default="/lidar_preprocessor/meta_cloud"/>
+  <!-- INS 话题；首帧 pose 会作为 LO 初值。 -->
+  <arg name="ins_topic" default="/localization/ins"/>
+  <!-- LO 输出坐标系。为了和 INS/PCD 叠加显示，默认用 map。 -->
+  <arg name="odom_frame" default="map"/>
+  <!-- meta_cloud 已经是 base_link 坐标系时可留空；如果点云是雷达系，可填 base_link 并提供 TF。 -->
+  <arg name="base_frame" default=""/>
+  <arg name="publish_odom_tf" default="true"/>
+  <arg name="visualize" default="true"/>
+
+  <!-- 首帧 INS 初始化开关。 -->
+  <arg name="use_ins_init" default="true"/>
+
+  <!-- RViz 参考全局地图：只显示，不参与 LO 匹配。 -->
+  <arg name="publish_global_map" default="true"/>
+  <arg name="map_path" default="/home/guoli/data/yangpu/loc/map.pcd"/>
+  <arg name="global_map_frame" default="map"/>
+  <arg name="global_map_publish_period" default="20.0"/>
+
+  <!-- GenZ-ICP 参数。 -->
+  <arg name="config_file" default="outdoor.yaml"/>
+
+  <!-- 可选录评估 bag；默认只录 LO odometry 和 INS，不录点云，方便 evo 评估且体积较小。 -->
+  <arg name="record" default="true"/>
+  <arg name="record_bag" default="/home/guoli/data/yangpu/loc/loc_lo_eval.bag"/>
+
+  <node pkg="genz_icp" type="loc_lo_node" name="loc_lo_node" output="screen">
+    <remap from="pointcloud_topic" to="$(arg topic)"/>
+    <param name="odom_frame" value="$(arg odom_frame)"/>
+    <param name="base_frame" value="$(arg base_frame)"/>
+    <param name="publish_odom_tf" value="$(arg publish_odom_tf)"/>
+    <param name="visualize" value="$(arg visualize)"/>
+    <param name="use_ins_init" value="$(arg use_ins_init)"/>
+    <param name="ins_topic" value="$(arg ins_topic)"/>
+    <param name="publish_global_map" value="$(arg publish_global_map)"/>
+    <param name="map_path" value="$(arg map_path)"/>
+    <param name="global_map_frame" value="$(arg global_map_frame)"/>
+    <param name="global_map_publish_period" value="$(arg global_map_publish_period)"/>
+    <rosparam command="load" file="$(find genz_icp)/config/$(arg config_file)"/>
+  </node>
+
+  <group if="$(arg visualize)">
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find genz_icp)/rviz/loc_lo.rviz"/>
+  </group>
+
+  <group if="$(arg record)">
+    <node pkg="rosbag" type="record" name="loc_lo_eval_recorder" output="screen"
+          args="-O $(arg record_bag)
+                /genz/odometry
+                $(arg ins_topic)"/>
+  </group>
+</launch>

@@ -11,9 +11,9 @@
 //      launch 启动节点后，用户自己 rosbag play。
 //      节点订阅 /localization/ins 和 /lidar_preprocessor/meta_cloud。
 //      收到第一帧 INS 后才加载地图，并用这帧 INS 作为初始位姿。
-//      后续每帧点云做 scan-to-map ICP，并发布 /yangpu_genz/odometry、/trajectory、/aligned_scan。
-//      同时把 INS 累积为 /yangpu_genz/ins_trajectory，方便 RViz 直接对比两条轨迹。
-//      调试时还会发布 /yangpu_genz/planar_points 和 /yangpu_genz/non_planar_points。
+//      后续每帧点云做 scan-to-map ICP，并发布 /genz_loc/odometry、/trajectory、/aligned_scan。
+//      同时把 INS 累积为 /genz_loc/ins_trajectory，方便 RViz 直接对比两条轨迹。
+//      调试时还会发布 /genz_loc/planar_points 和 /genz_loc/non_planar_points。
 //
 //   2. 离线模式（不加 --online）：
 //      程序自己打开 bag，先找第一帧 INS，再加载地图，然后顺序处理 bag 中的 INS 和点云。
@@ -29,13 +29,14 @@
 //       -> CloudCallback()
 //       -> PointCloud2 转 Eigen 点
 //       -> 按距离裁剪 + 体素降采样
-//       -> 以上一帧 ICP 或 INS 作为初值
-//       -> Registration::RegisterFrame() 做 scan-to-map
-//       -> 发布 Odometry/Path/Aligned Scan/平面点/非平面点，并写 CSV
-//   INS 回调会同步发布 /yangpu_genz/ins_trajectory 作为参考轨迹。
+//       -> 预测当前位姿：以上一帧 ICP 或 INS 帧间增量作为初值
+//       -> 观测更新：Registration::RegisterFrame() 做 scan-to-map
+//       -> 更新 local_map 和 trajectory
+//       -> 发布 Odometry/Path/Local Map/Aligned Scan/平面点/非平面点，并写 CSV
+//   INS 回调会同步发布 /genz_loc/ins_trajectory 作为参考轨迹。
 //
 // 注意：
-//   - RViz 中的地图 /yangpu_genz/global_map 是 latched 发布，但只有第一帧 INS 到来并成功 LoadMap 后才会发布。
+//   - RViz 中的地图 /genz_loc/global_map 是 latched 发布，但只有第一帧 INS 到来并成功 LoadMap 后才会发布。
 //   - 如果 map_path 指向大 PCD，PCL 会先把整个 PCD 读进内存，再由 LoadMap 做半径裁剪。
 //     因此大图建议提前降采样或拆分，否则可能启动时内存压力很大。
 
@@ -99,6 +100,8 @@ struct Options {
     double replay_rate = 1.0;
     // 地图裁剪半径；0 表示使用完整地图，大于 0 表示以初始位置为圆心裁剪。
     double map_radius = 160.0;
+    // 在线维护的局部地图清理半径；超过当前定位结果该距离的 local_map 点会被移除。
+    double local_map_radius = 80.0;
     // 点云最小距离，过滤车身附近过近点。
     double min_range = 0.5;
     // 点云最大距离，过滤远处点。
@@ -159,11 +162,25 @@ void PrintUsage(const char *argv0) {
         << "  --init-z Z                  legacy manual init z, online launch normally uses first INS\n"
         << "  --init-yaw RAD              legacy manual init yaw, online launch normally uses first INS\n"
         << "  --map-radius M              default: 160, crop global map around first INS pose\n"
+        << "  --local-map-radius M        default: 80, rolling local map cleanup radius\n"
         << "  --map-voxel M               default: 0.6\n"
         << "  --scan-voxel M              default: 0.6\n"
         << "  --max-corr M                default: 2.0\n"
         << "  --kernel VALUE              default: 0.7\n"
-        << "  --no-ins-prediction         use previous ICP pose only after first-frame INS init\n";
+        << "  --use-ins-prediction BOOL   default: true, use INS delta after first INS init\n"
+        << "  --no-ins-prediction         same as --use-ins-prediction false\n";
+}
+
+bool ParseBool(const std::string &value) {
+    if (value == "1" || value == "true" || value == "True" || value == "TRUE" ||
+        value == "yes" || value == "on") {
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "False" || value == "FALSE" ||
+        value == "no" || value == "off") {
+        return false;
+    }
+    throw std::runtime_error("Invalid bool value: " + value);
 }
 
 bool ParseArgs(int argc, char **argv, Options *options) {
@@ -196,11 +213,13 @@ bool ParseArgs(int argc, char **argv, Options *options) {
             else if (arg == "--init-z") options->init_z = std::stod(need_value(arg));
             else if (arg == "--init-yaw") options->init_yaw = std::stod(need_value(arg));
             else if (arg == "--map-radius") options->map_radius = std::stod(need_value(arg));
+            else if (arg == "--local-map-radius") options->local_map_radius = std::stod(need_value(arg));
             else if (arg == "--map-voxel") options->map_voxel_size = std::stod(need_value(arg));
             else if (arg == "--scan-voxel") options->scan_voxel_size = std::stod(need_value(arg));
             else if (arg == "--max-corr") options->max_correspondence_distance = std::stod(need_value(arg));
             else if (arg == "--kernel") options->kernel = std::stod(need_value(arg));
             else if (arg == "--max-iterations") options->max_iterations = std::stoi(need_value(arg));
+            else if (arg == "--use-ins-prediction") options->use_ins_prediction = ParseBool(need_value(arg));
             else if (arg == "--no-ins-prediction") options->use_ins_prediction = false;
             else if (arg == "--publish") options->publish = true;
             else if (arg == "--no-publish-map") options->publish_map = false;
@@ -406,6 +425,14 @@ genz_icp::VoxelHashMap LoadMap(const Options &options, const Sophus::SE3d &first
     return map;
 }
 
+genz_icp::VoxelHashMap CreateLocalMap(const Options &options) {
+    return genz_icp::VoxelHashMap(options.scan_voxel_size,
+                                  options.max_range,
+                                  options.local_map_radius,
+                                  options.planarity_threshold,
+                                  options.max_points_per_voxel);
+}
+
 // 离线模式专用：从一个或多个 bag 中找到第一帧 INS。
 // 找到后返回 SE3 位姿，用于初始化地图裁剪中心和第一帧 ICP 初值。
 std::optional<Sophus::SE3d> FindFirstIns(const std::vector<std::string> &bag_paths,
@@ -433,6 +460,8 @@ public:
         : nh_(nh),
           // 保存命令行/launch 参数。
           options_(options),
+          // 维护当前定位轨迹附近的 rolling local_map，和 OdometryServer 的 local_map 调试输出一致。
+          local_map_(CreateLocalMap(options)),
           // 构造底层 ICP 配准器。
           registration_(options.max_iterations, options.convergence_criterion) {
         // 关闭 Registration 内部终端动画，避免刷屏影响 ROS 日志。
@@ -451,19 +480,21 @@ public:
                 "error_xy,error_z,error_yaw_rad\n";
 
         // 发布全局地图点云，latched=true，新打开 RViz 也能收到最后一次地图。
-        map_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/global_map", 1, true);
+        map_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/genz_loc/global_map", 1, true);
+        // 发布在线维护的局部地图，保存当前轨迹附近最近的已配准 scan 点。
+        local_map_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/genz_loc/local_map", 2);
         // 发布每帧配准后的点云，用于 RViz 看 scan 是否贴合地图。
-        aligned_scan_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/aligned_scan", 2);
+        aligned_scan_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/genz_loc/aligned_scan", 2);
         // 发布当前帧中被判定为平面的约束点，用于调试点到面约束。
-        planar_points_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/planar_points", 2);
+        planar_points_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/genz_loc/planar_points", 2);
         // 发布当前帧中被判定为非平面的约束点，用于调试点到点约束。
-        non_planar_points_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/non_planar_points", 2);
+        non_planar_points_publisher_ = nh_.advertise<sensor_msgs::PointCloud2>("/genz_loc/non_planar_points", 2);
         // 发布 GenZ-ICP 地图定位结果，evo 主要评估这个话题。
-        odom_publisher_ = nh_.advertise<nav_msgs::Odometry>("/yangpu_genz/odometry", 20);
+        odom_publisher_ = nh_.advertise<nav_msgs::Odometry>("/genz_loc/odometry", 20);
         // 发布累计轨迹给 RViz；评估时不要录这个话题，Path 会越来越大。
-        path_publisher_ = nh_.advertise<nav_msgs::Path>("/yangpu_genz/trajectory", 2, true);
+        path_publisher_ = nh_.advertise<nav_msgs::Path>("/genz_loc/trajectory", 2, true);
         // 发布 INS 累计轨迹，和 ICP 轨迹叠加显示，方便肉眼比较漂移和跳变。
-        ins_path_publisher_ = nh_.advertise<nav_msgs::Path>("/yangpu_genz/ins_trajectory", 2, true);
+        ins_path_publisher_ = nh_.advertise<nav_msgs::Path>("/genz_loc/ins_trajectory", 2, true);
         // 设置 Path 的坐标系。
         path_msg_.header.frame_id = options.frame_id;
         // INS Path 也放在 map 坐标系下；这里默认 /localization/ins 与地图同系。
@@ -493,7 +524,7 @@ private:
     // 做的事情：
     //   1. 使用第一帧 INS 作为中心调用 LoadMap()。
     //   2. 把得到的 VoxelHashMap 存入 global_map_。
-    //   3. 如果开启 publish_map，把地图发布到 /yangpu_genz/global_map。
+    //   3. 如果开启 publish_map，把地图发布到 /genz_loc/global_map。
     //
     // 为什么不在构造函数加载地图：
     //   构造函数执行时还没收到 loc/A203 等不同数据集的真实第一帧 INS。
@@ -531,7 +562,7 @@ private:
     void InsCallback(const nav_msgs::Odometry::ConstPtr &msg) {
         // 把 ROS Odometry 转成 Sophus SE3，便于后续和 ICP 位姿做运算。
         latest_ins_ = OdomToSophus(*msg);
-        // 把每帧 INS 也累积成 Path，RViz 中可直接和 /yangpu_genz/trajectory 对比。
+        // 把每帧 INS 也累积成 Path，RViz 中可直接和 /genz_loc/trajectory 对比。
         geometry_msgs::PoseStamped ins_pose_msg;
         // INS 轨迹使用原始 INS 时间戳，但坐标系统一显示为 map。
         ins_pose_msg.header.stamp = msg->header.stamp;
@@ -543,7 +574,7 @@ private:
         ins_path_msg_.header.stamp = msg->header.stamp;
         // 追加 INS 轨迹点。
         ins_path_msg_.poses.push_back(ins_pose_msg);
-        // 发布 /yangpu_genz/ins_trajectory。
+        // 发布 /genz_loc/ins_trajectory。
         ins_path_publisher_.publish(ins_path_msg_);
         // 只在第一次收到 INS 时打印初始化信息。
         if (!first_ins_received_) {
@@ -564,7 +595,7 @@ private:
     //
     // 坐标系说明：
     //   Registration 内部会先用 initial_guess 把 source 变到 map 下，再迭代更新 source。
-    //   因此这里直接以 options_.frame_id 发布，方便和 /yangpu_genz/global_map 叠加观察。
+    //   因此这里直接以 options_.frame_id 发布，方便和 /genz_loc/global_map 叠加观察。
     void PublishDebugPoints(const ros::Time &stamp,
                             const std::vector<Eigen::Vector3d> &planar_points,
                             const std::vector<Eigen::Vector3d> &non_planar_points) {
@@ -580,6 +611,38 @@ private:
         non_planar_points_publisher_.publish(*genz_icp_ros::utils::EigenToPointCloud2(non_planar_points, header));
     }
 
+    Sophus::SE3d PredictPose() const {
+        // 第一帧或上一帧定位不可用时，直接用最新 INS 作为地图定位初值。
+        Sophus::SE3d prediction = *latest_ins_;
+        if (!previous_icp_) return prediction;
+
+        if (options_.use_ins_prediction && previous_ins_) {
+            // INS 提供帧间运动预测，ICP 观测只负责把预测拉回全局地图。
+            const Sophus::SE3d delta_ins = previous_ins_->inverse() * (*latest_ins_);
+            return (*previous_icp_) * delta_ins;
+        }
+
+        // 关闭 INS prediction 时，使用 OdometryServer.cpp/GenZICP 同款 ICP 恒速模型。
+        if (pose_history_.size() >= 2) {
+            const Sophus::SE3d delta_icp =
+                pose_history_[pose_history_.size() - 2].inverse() * pose_history_.back();
+            prediction = pose_history_.back() * delta_icp;
+        } else {
+            // 只有一帧 ICP 历史时还无法估计速度，退化为上一帧 ICP 位姿。
+            prediction = *previous_icp_;
+        }
+        return prediction;
+    }
+
+    void UpdateLocalMapAndPublish(const std::vector<Eigen::Vector3d> &source,
+                                  const Sophus::SE3d &pose,
+                                  const std_msgs::Header &header) {
+        // 观测更新完成后，把当前 scan 按最终 pose 写进 rolling local_map。
+        local_map_.Update(source, pose);
+        // 发布当前 rolling local_map，方便检查定位轨迹附近的局部建图是否连续。
+        local_map_publisher_.publish(*genz_icp_ros::utils::EigenToPointCloud2(local_map_.Pointcloud(), header));
+    }
+
     // 点云回调：在线定位最核心的入口。
     //
     // 每来一帧 /lidar_preprocessor/meta_cloud，执行下面流程：
@@ -587,12 +650,13 @@ private:
     //   2. PointCloud2 -> Eigen 点数组。
     //   3. 距离裁剪，去掉太近/太远的点。
     //   4. 体素降采样，减少 ICP 计算量。
-    //   5. 生成 ICP 初值：
-    //      - 第一帧用当前 INS；
-    //      - 后续默认用上一帧 ICP；
-    //      - 如果开启 INS prediction，则在上一帧 ICP 上叠加 INS 帧间增量。
-    //   6. 调 Registration::RegisterFrame() 做 scan-to-map。
-    //   7. 发布 odometry/path/aligned_scan/平面点/非平面点，并写一行 CSV。
+    //   5. 预测当前位姿：
+    //      - 第一帧永远用当前 INS；
+    //      - 开启 INS prediction 时，在上一帧 ICP 上叠加 INS 帧间增量；
+    //      - 关闭 INS prediction 时，使用最近两帧 ICP 的恒速模型。
+    //   6. 观测更新：调 Registration::RegisterFrame() 做 scan-to-map。
+    //   7. 更新 local_map 和轨迹。
+    //   8. 发布 odometry/path/local_map/aligned_scan/平面点/非平面点，并写一行 CSV。
     void CloudCallback(const sensor_msgs::PointCloud2::ConstPtr &msg) {
         // 没有 INS 初值时，不处理点云，避免 ICP 从错误初值开始。
         if (!latest_ins_) {
@@ -622,20 +686,8 @@ private:
         // 对当前帧点云体素下采样，减少 ICP 计算量。
         const auto source = genz_icp::VoxelDownsample(cropped, options_.scan_voxel_size);
 
-        // 默认初值使用当前 INS；第一帧 ICP 就会走这里。
-        Sophus::SE3d initial_guess = *latest_ins_;
-        // 如果已经有上一帧 ICP 结果，后续优先用上一帧 ICP 做初值。
-        if (previous_icp_) {
-            // 将初值设为上一帧 ICP 位姿，适合连续低速运动。
-            initial_guess = *previous_icp_;
-            // 如果启用 INS prediction，就把 INS 帧间运动叠加到上一帧 ICP 上。
-            if (options_.use_ins_prediction && previous_ins_) {
-                // 计算上一帧 INS 到当前 INS 的相对运动。
-                const Sophus::SE3d delta_ins = previous_ins_->inverse() * (*latest_ins_);
-                // 用上一帧 ICP 位姿加 INS 增量作为当前初值。
-                initial_guess = (*previous_icp_) * delta_ins;
-            }
-        }
+        // 预测：用 INS 初值、上一帧 ICP，或 INS 帧间增量生成当前观测的 initial_guess。
+        const Sophus::SE3d initial_guess = PredictPose();
 
         // 调用 GenZ-ICP 底层配准：把当前帧 source 对齐到全局体素地图。
         //
@@ -669,7 +721,7 @@ private:
         odom_msg.child_frame_id = "base_link";
         // 写入 ICP 估计位姿。
         odom_msg.pose.pose = SophusToPose(pose);
-        // 发布 /yangpu_genz/odometry。
+        // 发布 /genz_loc/odometry。
         odom_publisher_.publish(odom_msg);
 
         // 构造当前帧轨迹点。
@@ -682,8 +734,10 @@ private:
         path_msg_.header.stamp = header.stamp;
         // 把当前位姿追加到累计轨迹。
         path_msg_.poses.push_back(pose_msg);
-        // 发布 /yangpu_genz/trajectory 给 RViz。
+        // 发布 /genz_loc/trajectory 给 RViz。
         path_publisher_.publish(path_msg_);
+        // 更新并发布 rolling local_map；它保存的是观测更新后的局部点云。
+        UpdateLocalMapAndPublish(source, pose, header);
         // 把当前帧点云按 ICP 位姿变换到 map 下并发布，便于看是否贴合地图。
         aligned_scan_publisher_.publish(*genz_icp_ros::utils::EigenToPointCloud2(source, pose, header));
         // 发布参与本次 ICP 优化的平面点和非平面点，方便调试匹配质量。
@@ -716,6 +770,8 @@ private:
 
         // 保存当前 ICP 位姿，下一帧用作初值。
         previous_icp_ = pose;
+        // 保存 ICP 位姿历史；关闭 INS prediction 时用于恒速预测。
+        pose_history_.push_back(pose);
         // 保存当前 INS 位姿，下一帧如果启用 INS prediction 会用它计算增量。
         previous_ins_ = latest_ins_;
         // 帧计数加一。
@@ -728,10 +784,14 @@ private:
     Options options_;
     // 全局体素地图；在线模式收到第一帧 INS 后才构造。
     std::optional<genz_icp::VoxelHashMap> global_map_;
+    // 当前定位轨迹附近的 rolling local_map；每帧观测后用最终 pose 更新。
+    genz_icp::VoxelHashMap local_map_;
     // 底层 GenZ-ICP 配准器。
     genz_icp::Registration registration_;
     // 全局地图发布器。
     ros::Publisher map_publisher_;
+    // 局部地图发布器。
+    ros::Publisher local_map_publisher_;
     // 配准后当前帧点云发布器。
     ros::Publisher aligned_scan_publisher_;
     // 平面约束点发布器。
@@ -760,6 +820,8 @@ private:
     std::optional<Sophus::SE3d> previous_ins_;
     // 上一帧 ICP 位姿。
     std::optional<Sophus::SE3d> previous_icp_;
+    // ICP 位姿历史；用于和 OdometryServer.cpp 一样构造恒速预测。
+    std::vector<Sophus::SE3d> pose_history_;
     // 第一帧点云时间戳，用于计算 elapsed。
     std::optional<ros::Time> start_stamp_;
     // 是否已经收到第一帧 INS。
@@ -840,6 +902,8 @@ int main(int argc, char **argv) {
 
     // 根据首帧 INS 位置加载/裁剪全局地图。
     auto global_map = LoadMap(options, *first_ins);
+    // 离线模式同样维护 rolling local_map，便于和在线模式/RViz 输出保持一致。
+    auto local_map = CreateLocalMap(options);
     // 构造底层 ICP 配准器。
     genz_icp::Registration registration(options.max_iterations, options.convergence_criterion);
     // 关闭终端动画输出。
@@ -847,6 +911,8 @@ int main(int argc, char **argv) {
 
     // 离线模式下可选发布 RViz 话题。
     ros::Publisher map_publisher;
+    // rolling 局部地图发布器。
+    ros::Publisher local_map_publisher;
     // 配准后当前帧点云发布器。
     ros::Publisher aligned_scan_publisher;
     // 平面约束点发布器。
@@ -864,17 +930,19 @@ int main(int argc, char **argv) {
     // 如果用户加了 --publish，就创建 publisher。
     if (options.publish) {
         // 发布全局地图。
-        map_publisher = nh.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/global_map", 1, true);
+        map_publisher = nh.advertise<sensor_msgs::PointCloud2>("/genz_loc/global_map", 1, true);
+        // 发布 rolling 局部地图。
+        local_map_publisher = nh.advertise<sensor_msgs::PointCloud2>("/genz_loc/local_map", 2);
         // 发布配准后当前帧点云。
-        aligned_scan_publisher = nh.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/aligned_scan", 2);
+        aligned_scan_publisher = nh.advertise<sensor_msgs::PointCloud2>("/genz_loc/aligned_scan", 2);
         // 发布当前帧中被判定为平面的约束点。
-        planar_points_publisher = nh.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/planar_points", 2);
+        planar_points_publisher = nh.advertise<sensor_msgs::PointCloud2>("/genz_loc/planar_points", 2);
         // 发布当前帧中被判定为非平面的约束点。
-        non_planar_points_publisher = nh.advertise<sensor_msgs::PointCloud2>("/yangpu_genz/non_planar_points", 2);
+        non_planar_points_publisher = nh.advertise<sensor_msgs::PointCloud2>("/genz_loc/non_planar_points", 2);
         // 发布 ICP 输出 odometry。
-        odom_publisher = nh.advertise<nav_msgs::Odometry>("/yangpu_genz/odometry", 20);
+        odom_publisher = nh.advertise<nav_msgs::Odometry>("/genz_loc/odometry", 20);
         // 发布累计轨迹。
-        path_publisher = nh.advertise<nav_msgs::Path>("/yangpu_genz/trajectory", 2, true);
+        path_publisher = nh.advertise<nav_msgs::Path>("/genz_loc/trajectory", 2, true);
         // 根据参数决定是否发布地图。
         if (options.publish_map) {
             // 创建地图消息 header。
@@ -928,6 +996,8 @@ int main(int argc, char **argv) {
     std::optional<Sophus::SE3d> previous_ins;
     // 上一帧 ICP 位姿缓存。
     std::optional<Sophus::SE3d> previous_icp;
+    // ICP 位姿历史；关闭 INS prediction 时用于恒速预测。
+    std::vector<Sophus::SE3d> pose_history;
     // 已处理点云帧号。
     size_t frame_index = 0;
     // 累计 xy 误差，用于最后算平均值。
@@ -976,18 +1046,18 @@ int main(int argc, char **argv) {
         // 当前帧下采样。
         const auto source = genz_icp::VoxelDownsample(cropped, options.scan_voxel_size);
 
-        // 第一帧默认使用当前 INS 作为 ICP 初值。
+        // 预测：第一帧使用 INS；之后按配置使用 INS 增量或 ICP 恒速模型。
         Sophus::SE3d initial_guess = *latest_ins;
-        // 如果已有上一帧 ICP，则用上一帧结果预测当前位姿。
         if (previous_icp) {
-            // 默认只用上一帧 ICP。
-            initial_guess = *previous_icp;
-            // 如果启用 INS prediction，就叠加 INS 帧间增量。
             if (options.use_ins_prediction && previous_ins) {
-                // 计算 INS 帧间运动。
                 const Sophus::SE3d delta_ins = previous_ins->inverse() * (*latest_ins);
-                // 叠加到上一帧 ICP 位姿上。
                 initial_guess = (*previous_icp) * delta_ins;
+            } else if (pose_history.size() >= 2) {
+                const Sophus::SE3d delta_icp =
+                    pose_history[pose_history.size() - 2].inverse() * pose_history.back();
+                initial_guess = pose_history.back() * delta_icp;
+            } else {
+                initial_guess = *previous_icp;
             }
         }
 
@@ -999,6 +1069,8 @@ int main(int argc, char **argv) {
                                        initial_guess,
                                        options.max_correspondence_distance,
                                        options.kernel);
+        // 观测更新完成后维护 rolling local_map，并以当前 pose 为中心清理远处点。
+        local_map.Update(source, pose);
 
         // 离线模式如果开启发布，就把结果发给 RViz。
         if (options.publish && ros::ok()) {
@@ -1032,6 +1104,8 @@ int main(int argc, char **argv) {
             path_msg.poses.push_back(pose_msg);
             // 发布轨迹。
             path_publisher.publish(path_msg);
+            // 发布 rolling local_map，观察离线定位过程中的局部建图。
+            local_map_publisher.publish(*genz_icp_ros::utils::EigenToPointCloud2(local_map.Pointcloud(), header));
 
             // 发布配准后点云，观察 scan 是否贴合地图。
             aligned_scan_publisher.publish(
@@ -1086,6 +1160,8 @@ int main(int argc, char **argv) {
 
         // 保存当前 ICP 位姿，供下一帧预测。
         previous_icp = pose;
+        // 保存 ICP 位姿历史；关闭 INS prediction 时用于恒速预测。
+        pose_history.push_back(pose);
         // 保存当前 INS 位姿，供下一帧 INS prediction。
         previous_ins = latest_ins;
         // 帧号加一。
