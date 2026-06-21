@@ -69,6 +69,17 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
   target_include_directories(loc_lo_node PUBLIC include ${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/ros1)
   target_link_libraries(loc_lo_node genz_icp::pipeline ${catkin_LIBRARIES} ${PCL_LIBRARIES})
 
+  add_executable(loc_lio_node ros1/Loc_LIO.cpp)
+  target_compile_features(loc_lio_node PUBLIC cxx_std_20)
+  target_include_directories(loc_lio_node PUBLIC include ${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/ros1)
+  target_link_libraries(loc_lio_node genz_icp::pipeline ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
+  # 无 ROS master 的确定性离线 LIO 回放工具，用于完整 bag 的 evo 回归测试。
+  add_executable(offline_lio_eval tools/OfflineLioEval.cpp)
+  target_compile_features(offline_lio_eval PUBLIC cxx_std_20)
+  target_include_directories(offline_lio_eval PUBLIC include ${catkin_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/ros1)
+  target_link_libraries(offline_lio_eval genz_icp::pipeline ${catkin_LIBRARIES})
+
   # Offline Yangpu map-localization validation tool
   add_executable(yangpu_map_localization tools/Loc_Map.cpp)
   target_compile_features(yangpu_map_localization PUBLIC cxx_std_20)
@@ -83,6 +94,8 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
 
   install(TARGETS odometry_node RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(TARGETS loc_lo_node RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+  install(TARGETS loc_lio_node RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+  install(TARGETS offline_lio_eval RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(TARGETS yangpu_map_localization RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(TARGETS pcd_downsample RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
   install(DIRECTORY launch DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

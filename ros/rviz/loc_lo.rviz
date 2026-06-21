@@ -203,6 +203,26 @@ Visualization Manager:
       Topic: /genz/odometry
       Unreliable: false
       Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz/Odometry
+      Enabled: true
+      Keep: 1
+      Name: IMU Prediction
+      Position Tolerance: 0.05
+      Queue Size: 10
+      Shape:
+        Alpha: 0.8
+        Axes Length: 1
+        Axes Radius: 0.08
+        Color: 0; 220; 255
+        Head Length: 0.3
+        Head Radius: 0.1
+        Shaft Length: 1
+        Shaft Radius: 0.04
+        Value: Arrow
+      Topic: /genz/imu_prediction
+      Unreliable: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 28; 30; 34

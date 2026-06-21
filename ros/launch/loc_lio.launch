@@ -1,0 +1,105 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- 输入点云、IMU 和 INS；节点本身不播放 bag。 -->
+  <arg name="topic" default="/lidar_preprocessor/meta_cloud"/>
+  <arg name="imu_topic" default="/ins_driver/imu"/>
+  <arg name="ins_topic" default="/localization/ins"/>
+
+  <arg name="odom_frame" default="map"/>
+  <arg name="base_frame" default=""/>
+  <arg name="publish_odom_tf" default="true"/>
+  <arg name="visualize" default="true"/>
+  <arg name="rviz" default="true"/>
+
+  <!-- 本次默认只用 raw INS 初始化，便于和 LocLO 匀速模型公平比较。 -->
+  <arg name="use_ins_init" default="true"/>
+  <arg name="refine_ins_init" default="false"/>
+
+  <!-- IMU 预测开关；关闭后恢复 GenZ-ICP 内部匀速模型。 -->
+  <arg name="use_imu_prediction" default="true"/>
+  <arg name="imu_fallback_to_constant_velocity" default="true"/>
+  <!-- 当前 /ins_driver/imu 加速度模长约为 1g，因此默认乘标准重力。 -->
+  <arg name="imu_accel_scale" default="9.80665"/>
+  <arg name="imu_gravity_magnitude" default="9.80665"/>
+  <arg name="imu_max_sample_gap" default="0.05"/>
+  <arg name="imu_max_prediction_interval" default="0.25"/>
+  <arg name="imu_velocity_correction_gain" default="1.0"/>
+  <arg name="imu_max_acceleration" default="30.0"/>
+  <arg name="imu_max_angular_velocity" default="3.0"/>
+
+  <!-- 可选地图显示/精匹配初始化参数；默认不启用。 -->
+  <arg name="publish_global_map" default="false"/>
+  <arg name="map_path" default="/home/guoli/data/yangpu/loc/map.pcd"/>
+  <arg name="global_map_frame" default="map"/>
+  <arg name="global_map_publish_period" default="20.0"/>
+  <arg name="init_fine_score_threshold" default="0.35"/>
+  <arg name="init_min_correspondences" default="300"/>
+  <arg name="init_scan_voxel" default="0.6"/>
+  <arg name="init_max_corr" default="2.0"/>
+  <arg name="init_kernel" default="0.7"/>
+  <arg name="init_map_crop_radius" default="160.0"/>
+  <arg name="init_use_ndt_fallback" default="true"/>
+  <arg name="init_ndt_source_voxel" default="1.0"/>
+  <arg name="init_ndt_map_voxel" default="1.0"/>
+  <arg name="init_ndt_resolution" default="2.0"/>
+  <arg name="init_ndt_max_iterations" default="35"/>
+  <arg name="init_ndt_transformation_epsilon" default="0.01"/>
+  <arg name="init_ndt_step_size" default="0.1"/>
+  <arg name="init_ndt_max_fitness_score" default="3.0"/>
+
+  <arg name="config_file" default="outdoor.yaml"/>
+  <arg name="record" default="true"/>
+  <arg name="record_bag" default="/home/guoli/data/yangpu/loc/loc_lio_imu_eval.bag"/>
+
+  <node pkg="genz_icp" type="loc_lio_node" name="loc_lio_node" output="screen">
+    <remap from="pointcloud_topic" to="$(arg topic)"/>
+    <param name="imu_topic" value="$(arg imu_topic)"/>
+    <param name="ins_topic" value="$(arg ins_topic)"/>
+    <param name="odom_frame" value="$(arg odom_frame)"/>
+    <param name="base_frame" value="$(arg base_frame)"/>
+    <param name="publish_odom_tf" value="$(arg publish_odom_tf)"/>
+    <param name="visualize" value="$(arg visualize)"/>
+    <param name="use_ins_init" value="$(arg use_ins_init)"/>
+    <param name="refine_ins_init" value="$(arg refine_ins_init)"/>
+    <param name="use_imu_prediction" value="$(arg use_imu_prediction)"/>
+    <param name="imu_fallback_to_constant_velocity" value="$(arg imu_fallback_to_constant_velocity)"/>
+    <param name="imu_accel_scale" value="$(arg imu_accel_scale)"/>
+    <param name="imu_gravity_magnitude" value="$(arg imu_gravity_magnitude)"/>
+    <param name="imu_max_sample_gap" value="$(arg imu_max_sample_gap)"/>
+    <param name="imu_max_prediction_interval" value="$(arg imu_max_prediction_interval)"/>
+    <param name="imu_velocity_correction_gain" value="$(arg imu_velocity_correction_gain)"/>
+    <param name="imu_max_acceleration" value="$(arg imu_max_acceleration)"/>
+    <param name="imu_max_angular_velocity" value="$(arg imu_max_angular_velocity)"/>
+    <param name="publish_global_map" value="$(arg publish_global_map)"/>
+    <param name="map_path" value="$(arg map_path)"/>
+    <param name="global_map_frame" value="$(arg global_map_frame)"/>
+    <param name="global_map_publish_period" value="$(arg global_map_publish_period)"/>
+    <param name="init_fine_score_threshold" value="$(arg init_fine_score_threshold)"/>
+    <param name="init_min_correspondences" value="$(arg init_min_correspondences)"/>
+    <param name="init_scan_voxel" value="$(arg init_scan_voxel)"/>
+    <param name="init_max_corr" value="$(arg init_max_corr)"/>
+    <param name="init_kernel" value="$(arg init_kernel)"/>
+    <param name="init_map_crop_radius" value="$(arg init_map_crop_radius)"/>
+    <param name="init_use_ndt_fallback" value="$(arg init_use_ndt_fallback)"/>
+    <param name="init_ndt_source_voxel" value="$(arg init_ndt_source_voxel)"/>
+    <param name="init_ndt_map_voxel" value="$(arg init_ndt_map_voxel)"/>
+    <param name="init_ndt_resolution" value="$(arg init_ndt_resolution)"/>
+    <param name="init_ndt_max_iterations" value="$(arg init_ndt_max_iterations)"/>
+    <param name="init_ndt_transformation_epsilon" value="$(arg init_ndt_transformation_epsilon)"/>
+    <param name="init_ndt_step_size" value="$(arg init_ndt_step_size)"/>
+    <param name="init_ndt_max_fitness_score" value="$(arg init_ndt_max_fitness_score)"/>
+    <rosparam command="load" file="$(find genz_icp)/config/$(arg config_file)"/>
+  </node>
+
+  <group if="$(arg rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(find genz_icp)/rviz/loc_lo.rviz"/>
+  </group>
+
+  <group if="$(arg record)">
+    <node pkg="rosbag" type="record" name="loc_lio_eval_recorder" output="screen"
+          args="-O $(arg record_bag)
+                /genz/odometry
+                /genz/imu_prediction
+                $(arg ins_topic)"/>
+  </group>
+</launch>

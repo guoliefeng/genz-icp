@@ -23,6 +23,7 @@
 #pragma once
 
 #include <Eigen/Core>
+#include <optional>
 #include <tuple>
 #include <vector>
 
@@ -75,6 +76,10 @@ public:
     Vector3dVectorTuple RegisterFrame(const std::vector<Eigen::Vector3d> &frame);
     Vector3dVectorTuple RegisterFrame(const std::vector<Eigen::Vector3d> &frame,
                                       const std::vector<double> &timestamps);
+    /// 使用外部给定的绝对位姿作为本帧 ICP 初值；用于 IMU/INS 等传感器预测。
+    Vector3dVectorTuple RegisterFrame(const std::vector<Eigen::Vector3d> &frame,
+                                      const std::vector<double> &timestamps,
+                                      const Sophus::SE3d &initial_guess);
     void SetInitialPose(const Sophus::SE3d &pose);
     void SetTerminalStatusEnabled(bool enabled) { registration_.SetTerminalStatusEnabled(enabled); }
     Vector3dVectorTuple Voxelize(const std::vector<Eigen::Vector3d> &frame, double voxel_size) const;
@@ -88,6 +93,10 @@ public:
     std::vector<Sophus::SE3d> poses() const { return poses_; };
 
 private:
+    Vector3dVectorTuple RegisterFrameWithInitialGuess(
+        const std::vector<Eigen::Vector3d> &frame,
+        const std::optional<Sophus::SE3d> &external_initial_guess);
+
     // GenZ-ICP pipeline modules
     std::vector<Sophus::SE3d> poses_;
     GenZConfig config_;

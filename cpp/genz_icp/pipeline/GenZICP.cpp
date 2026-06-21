@@ -54,6 +54,18 @@ GenZICP::Vector3dVectorTuple GenZICP::RegisterFrame(const std::vector<Eigen::Vec
     return RegisterFrame(deskew_frame);
 }
 
+GenZICP::Vector3dVectorTuple GenZICP::RegisterFrame(const std::vector<Eigen::Vector3d> &frame,
+                                                    const std::vector<double> &timestamps,
+                                                    const Sophus::SE3d &initial_guess) {
+    const auto &deskew_frame = [&]() -> std::vector<Eigen::Vector3d> {
+        if (!config_.deskew || timestamps.empty()) return frame;
+        const size_t N = poses().size();
+        if (N <= 2) return frame;
+        return DeSkewScan(frame, timestamps, poses_[N - 2], poses_[N - 1]);
+    }();
+    return RegisterFrameWithInitialGuess(deskew_frame, initial_guess);
+}
+
 void GenZICP::SetInitialPose(const Sophus::SE3d &pose) {
     poses_.clear();
     poses_.push_back(pose);
@@ -61,6 +73,12 @@ void GenZICP::SetInitialPose(const Sophus::SE3d &pose) {
 }
 
 GenZICP::Vector3dVectorTuple GenZICP::RegisterFrame(const std::vector<Eigen::Vector3d> &frame) {
+    return RegisterFrameWithInitialGuess(frame, std::nullopt);
+}
+
+GenZICP::Vector3dVectorTuple GenZICP::RegisterFrameWithInitialGuess(
+    const std::vector<Eigen::Vector3d> &frame,
+    const std::optional<Sophus::SE3d> &external_initial_guess) {
     // Preprocess the input cloud
     const auto &cropped_frame = Preprocess(frame, config_.max_range, config_.min_range);
 
@@ -77,9 +95,12 @@ GenZICP::Vector3dVectorTuple GenZICP::RegisterFrame(const std::vector<Eigen::Vec
     const double sigma = GetAdaptiveThreshold();
 
     // Compute initial_guess for ICP
-    const auto prediction = GetPredictionModel();
-    const auto last_pose = !poses_.empty() ? poses_.back() : Sophus::SE3d();
-    const auto initial_guess = last_pose * prediction;
+    const auto initial_guess = [&]() {
+        if (external_initial_guess) return *external_initial_guess;
+        const auto prediction = GetPredictionModel();
+        const auto last_pose = !poses_.empty() ? poses_.back() : Sophus::SE3d();
+        return last_pose * prediction;
+    }();
 
     // Run GenZ-ICP
     const auto &[new_pose, planar_points, non_planar_points] = registration_.RegisterFrame(source,         //
