@@ -246,14 +246,158 @@ odometry_.SetTerminalStatusEnabled(false);
 - 降低调试点云发布频率，尤其是 `/genz/local_map`。
 - 给 `Registration::RegisterFrame()` 增加每帧耗时和对应点数量统计，定位 CPU 峰值对应的场景。
 
-### 7.3 稳定性观察点
+### 7.3 补充 evo 精度评估：仅使用 INS 初值
 
-本次只做资源测试，没有做轨迹精度评估。下一步建议结合 evo 对同一次或新一次录包进行：
+补充测试日期：2026-06-20  
+评估 bag：
 
-```bash
-evo_ape bag /home/guoli/data/yangpu/loc/loc_lo_eval.bag \
-  /localization/ins /genz/odometry \
-  -r trans_part --align --project_to_plane xy --t_max_diff 0.05 --plot
+```text
+/home/guoli/data/yangpu/loc/loc_lo_raw_ins_eval.bag
 ```
 
-资源和精度要一起看：例如降低点数能省 CPU，但可能导致长直路、开阔区域或动态物体多的场景漂移变大。
+本次补充测试关闭精匹配初始化，只用首帧 `/localization/ins` 直接初始化 LO：
+
+```bash
+roslaunch --skip-log-check genz_icp loc_lo.launch \
+  rviz:=false \
+  visualize:=false \
+  publish_global_map:=false \
+  record:=true \
+  record_bag:=/home/guoli/data/yangpu/loc/loc_lo_raw_ins_eval.bag \
+  refine_ins_init:=false
+```
+
+节点日志确认没有使用精匹配：
+
+```text
+LocLO initialized from INS pose xyz=   228.174   -48.0891 -0.0478386
+```
+
+评估 bag 内容：
+
+| 话题 | 数量 |
+| --- | --- |
+| `/genz/odometry` | 3668 |
+| `/localization/ins` | 33698 |
+
+评估 bag 大小：27.5 MB。
+
+#### APE 三维平移误差
+
+```bash
+evo_ape bag /home/guoli/data/yangpu/loc/loc_lo_raw_ins_eval.bag \
+  /localization/ins /genz/odometry \
+  --pose_relation trans_part \
+  --save_results /home/guoli/data/yangpu/loc/loc_lo_raw_ins_ape.zip
+```
+
+| 指标 | 数值 |
+| --- | --- |
+| RMSE | 0.440420 m |
+| mean | 0.413062 m |
+| median | 0.511828 m |
+| std | 0.152805 m |
+| min | 0.001000 m |
+| max | 0.708681 m |
+
+#### APE XY 平面误差
+
+```bash
+evo_ape bag /home/guoli/data/yangpu/loc/loc_lo_raw_ins_eval.bag \
+  /localization/ins /genz/odometry \
+  --pose_relation trans_part \
+  --project_to_plane xy
+```
+
+| 指标 | 数值 |
+| --- | --- |
+| RMSE | 0.285017 m |
+| mean | 0.268217 m |
+| median | 0.261083 m |
+| std | 0.096407 m |
+| min | 0.000000 m |
+| max | 0.672690 m |
+
+#### RPE 1m 相对平移误差
+
+```bash
+evo_rpe bag /home/guoli/data/yangpu/loc/loc_lo_raw_ins_eval.bag \
+  /localization/ins /genz/odometry \
+  --pose_relation trans_part \
+  --delta 1 \
+  --delta_unit m \
+  --save_results /home/guoli/data/yangpu/loc/loc_lo_raw_ins_rpe_1m.zip
+```
+
+| 指标 | 数值 |
+| --- | --- |
+| RMSE | 0.056767 m |
+| mean | 0.042440 m |
+| median | 0.031071 m |
+| std | 0.037701 m |
+| min | 0.003797 m |
+| max | 0.251822 m |
+
+#### 误差分解
+
+用最近时间戳匹配 `/genz/odometry` 与 `/localization/ins`，最大同步差限制为 0.05 s。
+
+| 指标 | 数值 |
+| --- | --- |
+| 匹配对数 | 3668 |
+| XY RMSE | 0.285364 m |
+| Z signed mean | -0.261800 m |
+| Z RMSE | 0.336346 m |
+| XYZ RMSE | 0.441091 m |
+| 平均同步时间差 | 0.003293 s |
+| 最大同步时间差 | 0.022897 s |
+
+轨迹图：
+
+```text
+/home/guoli/data/yangpu/loc/loc_lo_raw_ins_traj_xy.pdf
+```
+
+仅使用 INS 初值的 XY 轨迹如下。灰色虚线为 `/localization/ins`，蓝色实线为 `/genz/odometry`：
+
+![仅使用 INS 初值的 evo XY 轨迹](assets/loc_lo_raw_ins_traj_xy.png)
+
+#### 与精匹配裁剪地图版本对比
+
+对比版本见：
+
+```text
+docs/LocLO精匹配裁剪地图测试报告.md
+```
+
+| 指标 | 仅 INS 初值 | INS + GenZ 精匹配初始化 |
+| --- | ---: | ---: |
+| 初始化方式 | raw INS | INS 先验 + 裁剪地图 GenZ 精匹配 |
+| 初始化地图点数 | 0 | 346867 |
+| APE 3D RMSE | 0.440420 m | 1.869668 m |
+| APE XY RMSE | 0.285017 m | 0.541970 m |
+| RPE 1m RMSE | 0.056767 m | 0.061271 m |
+| Z signed mean | -0.261800 m | +1.782998 m |
+| `/genz/odometry` 路径长度 | 159.175 m | 159.379 m |
+| `/localization/ins` 路径长度 | 152.089 m | 152.089 m |
+| 评估 bag 大小 | 27.5 MB | 27.5 MB |
+
+#### 两种初始化方式的轨迹直观对比
+
+仅使用 INS 初值：
+
+![仅使用 INS 初值的 evo XY 轨迹](assets/loc_lo_raw_ins_traj_xy.png)
+
+INS + GenZ 精匹配初始化：
+
+![INS 加 GenZ 精匹配初始化的 evo XY 轨迹](assets/loc_lo_refined_crop_traj_xy.png)
+
+从图中可以看到，两组轨迹在大部分直线路段都与 INS 基本重合。精匹配初始化版本在左下弯道以及部分直线路段的横向偏差更明显，这与其较大的 XY APE RMSE 一致。
+
+结论：
+
+- 在 `merged_bag.bag` 这段数据上，仅使用 INS 首帧直接初始化的 evo 结果更好。
+- 精匹配初始化虽然首帧匹配分数很高，但输出 pose 的 Z 方向出现约 +1.78 m 系统偏差，导致 3D APE 明显变差，XY APE 也比 raw INS 初值更大。
+- RPE 1m 两者接近，说明后续 LO 相对运动都比较稳定，主要差异来自初始化全局 pose，尤其是高度/坐标基准。
+- 因此精匹配初始化不能只看 correspondence ratio 分数；还需要增加高度约束、INS 到匹配结果的位姿差门限、或只采用精匹配的 yaw/xy 修正而保留 INS 的 z。
+- 精匹配版本逐帧误差时刻、最大误差位置和坐标系原因分析见 `docs/LocLO精匹配裁剪地图测试报告.md` 第 6 节。

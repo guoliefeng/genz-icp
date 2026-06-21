@@ -55,7 +55,7 @@ if("$ENV{ROS_VERSION}" STREQUAL "1")
                std_msgs
                tf2
                tf2_ros)
-  find_package(PCL REQUIRED COMPONENTS common io filters)
+  find_package(PCL REQUIRED COMPONENTS common io filters registration)
   catkin_package()
 
   # ROS 1 node

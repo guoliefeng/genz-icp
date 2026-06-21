@@ -69,6 +69,8 @@ struct VoxelHashMap {
                                            double max_correspondance_distance) const;
     inline void Clear() { map_.clear(); }
     inline bool Empty() const { return map_.empty(); }
+    inline size_t VoxelCount() const { return map_.size(); }
+    size_t PointCount() const;
     void Update(const std::vector<Eigen::Vector3d> &points, const Eigen::Vector3d &origin);
     void Update(const std::vector<Eigen::Vector3d> &points, const Sophus::SE3d &pose);
     void AddPoints(const std::vector<Eigen::Vector3d> &points);

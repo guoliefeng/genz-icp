@@ -13,12 +13,30 @@
 
   <!-- 首帧 INS 初始化开关。 -->
   <arg name="use_ins_init" default="true"/>
+  <!-- 首帧 INS 是否先通过全局地图精配准修正，再作为 LO 初值。 -->
+  <arg name="refine_ins_init" default="true"/>
 
   <!-- RViz 参考全局地图：只显示，不参与 LO 匹配。 -->
   <arg name="publish_global_map" default="true"/>
   <arg name="map_path" default="/home/guoli/data/yangpu/loc/map.pcd"/>
   <arg name="global_map_frame" default="map"/>
   <arg name="global_map_publish_period" default="20.0"/>
+
+  <!-- 初始化配准参数：GenZ-ICP 精配准分数高则直接使用，分数低则 NDT 粗配准后再精配准。 -->
+  <arg name="init_fine_score_threshold" default="0.35"/>
+  <arg name="init_min_correspondences" default="300"/>
+  <arg name="init_scan_voxel" default="0.6"/>
+  <arg name="init_max_corr" default="2.0"/>
+  <arg name="init_kernel" default="0.7"/>
+  <arg name="init_map_crop_radius" default="160.0"/>
+  <arg name="init_use_ndt_fallback" default="true"/>
+  <arg name="init_ndt_source_voxel" default="1.0"/>
+  <arg name="init_ndt_map_voxel" default="1.0"/>
+  <arg name="init_ndt_resolution" default="2.0"/>
+  <arg name="init_ndt_max_iterations" default="35"/>
+  <arg name="init_ndt_transformation_epsilon" default="0.01"/>
+  <arg name="init_ndt_step_size" default="0.1"/>
+  <arg name="init_ndt_max_fitness_score" default="3.0"/>
 
   <!-- GenZ-ICP 参数。 -->
   <arg name="config_file" default="outdoor.yaml"/>
@@ -34,11 +52,26 @@
     <param name="publish_odom_tf" value="$(arg publish_odom_tf)"/>
     <param name="visualize" value="$(arg visualize)"/>
     <param name="use_ins_init" value="$(arg use_ins_init)"/>
+    <param name="refine_ins_init" value="$(arg refine_ins_init)"/>
     <param name="ins_topic" value="$(arg ins_topic)"/>
     <param name="publish_global_map" value="$(arg publish_global_map)"/>
     <param name="map_path" value="$(arg map_path)"/>
     <param name="global_map_frame" value="$(arg global_map_frame)"/>
     <param name="global_map_publish_period" value="$(arg global_map_publish_period)"/>
+    <param name="init_fine_score_threshold" value="$(arg init_fine_score_threshold)"/>
+    <param name="init_min_correspondences" value="$(arg init_min_correspondences)"/>
+    <param name="init_scan_voxel" value="$(arg init_scan_voxel)"/>
+    <param name="init_max_corr" value="$(arg init_max_corr)"/>
+    <param name="init_kernel" value="$(arg init_kernel)"/>
+    <param name="init_map_crop_radius" value="$(arg init_map_crop_radius)"/>
+    <param name="init_use_ndt_fallback" value="$(arg init_use_ndt_fallback)"/>
+    <param name="init_ndt_source_voxel" value="$(arg init_ndt_source_voxel)"/>
+    <param name="init_ndt_map_voxel" value="$(arg init_ndt_map_voxel)"/>
+    <param name="init_ndt_resolution" value="$(arg init_ndt_resolution)"/>
+    <param name="init_ndt_max_iterations" value="$(arg init_ndt_max_iterations)"/>
+    <param name="init_ndt_transformation_epsilon" value="$(arg init_ndt_transformation_epsilon)"/>
+    <param name="init_ndt_step_size" value="$(arg init_ndt_step_size)"/>
+    <param name="init_ndt_max_fitness_score" value="$(arg init_ndt_max_fitness_score)"/>
     <rosparam command="load" file="$(find genz_icp)/config/$(arg config_file)"/>
   </node>
 

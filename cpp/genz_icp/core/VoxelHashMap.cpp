@@ -217,6 +217,15 @@ std::vector<Eigen::Vector3d> VoxelHashMap::Pointcloud() const {
     return points;
 }
 
+size_t VoxelHashMap::PointCount() const {
+    size_t point_count = 0;
+    for (const auto &[voxel, voxel_block] : map_) {
+        (void)voxel;
+        point_count += voxel_block.points.size();
+    }
+    return point_count;
+}
+
 void VoxelHashMap::Update(const Vector3dVector &points, const Eigen::Vector3d &origin) {
     AddPoints(points);
     RemovePointsFarFromLocation(origin);

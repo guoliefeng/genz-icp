@@ -23,6 +23,7 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -32,6 +33,8 @@
 #include "Utils.hpp"
 
 // GenZ-ICP
+#include "genz_icp/core/Preprocessing.hpp"
+#include "genz_icp/core/Registration.hpp"
 #include "genz_icp/pipeline/GenZICP.hpp"
 
 // ROS 1 headers
@@ -43,9 +46,11 @@
 #include <ros/node_handle.h>
 #include <ros/ros.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/registration/ndt.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 
@@ -70,6 +75,30 @@ LocLO::LocLO(const ros::NodeHandle &nh, const ros::NodeHandle &pnh)
     pnh_.param("visualize", publish_debug_clouds_, publish_debug_clouds_);
     // 是否等待首帧 INS，并把 INS pose 作为 LO 初始位姿。
     pnh_.param("use_ins_init", use_ins_init_, use_ins_init_);
+    // 是否把首帧 INS 先放进全局 PCD 地图做一次初始化配准，再用配准 pose 初始化 LO。
+    pnh_.param("refine_ins_init", refine_ins_init_, refine_ins_init_);
+    // 初始化精配准分数阈值，分数是有效对应点数量/source 点数量。
+    pnh_.param("init_fine_score_threshold", init_fine_score_threshold_, init_fine_score_threshold_);
+    // 初始化精配准最少对应点数。
+    pnh_.param("init_min_correspondences", init_min_correspondences_, init_min_correspondences_);
+    // 初始化精配准当前帧下采样体素。
+    pnh_.param("init_scan_voxel", init_scan_voxel_size_, init_scan_voxel_size_);
+    // 初始化精配准最大对应距离。
+    pnh_.param("init_max_corr", init_max_correspondence_distance_, init_max_correspondence_distance_);
+    // 初始化精配准鲁棒核。
+    pnh_.param("init_kernel", init_kernel_, init_kernel_);
+    // 初始化地图裁剪半径；参考 Loc_Map 的 map_radius，以首帧 INS 的 xy 为中心裁剪。
+    pnh_.param("init_map_crop_radius", init_map_crop_radius_, init_map_crop_radius_);
+    // 精配准分数低时是否启用 NDT 粗配准回退。
+    pnh_.param("init_use_ndt_fallback", init_use_ndt_fallback_, init_use_ndt_fallback_);
+    // NDT source/map 下采样和优化参数。
+    pnh_.param("init_ndt_source_voxel", init_ndt_source_voxel_size_, init_ndt_source_voxel_size_);
+    pnh_.param("init_ndt_map_voxel", init_ndt_map_voxel_size_, init_ndt_map_voxel_size_);
+    pnh_.param("init_ndt_resolution", init_ndt_resolution_, init_ndt_resolution_);
+    pnh_.param("init_ndt_max_iterations", init_ndt_max_iterations_, init_ndt_max_iterations_);
+    pnh_.param("init_ndt_transformation_epsilon", init_ndt_transformation_epsilon_, init_ndt_transformation_epsilon_);
+    pnh_.param("init_ndt_step_size", init_ndt_step_size_, init_ndt_step_size_);
+    pnh_.param("init_ndt_max_fitness_score", init_ndt_max_fitness_score_, init_ndt_max_fitness_score_);
     // INS 输入话题。
     pnh_.param("ins_topic", ins_topic_, ins_topic_);
     // 是否加载并发布全局 PCD 地图；这个地图只用于 RViz 参考，不参与 LO 匹配。
@@ -114,6 +143,8 @@ LocLO::LocLO(const ros::NodeHandle &nh, const ros::NodeHandle &pnh)
 
     // 用读取到的配置构造 GenZ-ICP 主流水线对象。
     odometry_ = genz_icp::pipeline::GenZICP(config_);
+    // 日常运行和资源测试时关闭底层终端动画输出，避免 roslaunch 控制台刷屏。
+    odometry_.SetTerminalStatusEnabled(false);
 
     // 订阅点云话题；launch 会把 pointcloud_topic remap 成真实 LiDAR topic。
     pointcloud_sub_ = nh_.subscribe<sensor_msgs::PointCloud2>("pointcloud_topic", queue_size_,
@@ -137,10 +168,15 @@ LocLO::LocLO(const ros::NodeHandle &nh, const ros::NodeHandle &pnh)
         non_planar_points_publisher_ = pnh_.advertise<sensor_msgs::PointCloud2>("/genz/non_planar_points", queue_size_);
     }
     // 全局地图使用 latched publisher：RViz 晚启动也能收到最后一次地图消息。
-    if (publish_global_map_) {
+    if (publish_global_map_ || refine_ins_init_) {
         global_map_publisher_ = pnh_.advertise<sensor_msgs::PointCloud2>("/genz/global_map", 1, true);
-        LoadAndPublishGlobalMap();
-        if (global_map_publish_period_ > 0.0) {
+        if (!refine_ins_init_ && !LoadGlobalMapIfNeeded()) {
+            ROS_ERROR("Failed to load global map for RViz publishing.");
+        }
+        if (publish_global_map_ && !refine_ins_init_) {
+            LoadAndPublishGlobalMap();
+        }
+        if (publish_global_map_ && global_map_publish_period_ > 0.0) {
             global_map_timer_ = nh_.createTimer(ros::Duration(global_map_publish_period_),
                                                 &LocLO::PublishGlobalMap,
                                                 this);
@@ -154,7 +190,11 @@ LocLO::LocLO(const ros::NodeHandle &nh, const ros::NodeHandle &pnh)
     ins_path_msg_.header.frame_id = odom_frame_;
 
     if (use_ins_init_) {
-        ROS_INFO_STREAM("LocLO is waiting for INS init pose on " << ins_topic_);
+        if (refine_ins_init_) {
+            ROS_INFO_STREAM("LocLO is waiting for INS and first cloud to refine init pose on map: " << map_path_);
+        } else {
+            ROS_INFO_STREAM("LocLO is waiting for INS init pose on " << ins_topic_);
+        }
     } else {
         initialized_from_ins_ = true;
         ROS_WARN("LocLO use_ins_init=false, odometry will start from identity pose");
@@ -174,14 +214,15 @@ Sophus::SE3d LocLO::OdomToSophus(const nav_msgs::Odometry &odom) const {
 
 void LocLO::InsCallback(const nav_msgs::Odometry::ConstPtr &msg) {
     PublishInsTrajectory(*msg);
+    latest_ins_pose_ = OdomToSophus(*msg);
+    if (refine_ins_init_) return;
     if (initialized_from_ins_) return;
-    const Sophus::SE3d init_pose = OdomToSophus(*msg);
-    odometry_.SetInitialPose(init_pose);
+    odometry_.SetInitialPose(*latest_ins_pose_);
     path_msg_.poses.clear();
     path_msg_.header.frame_id = odom_frame_;
     initialized_from_ins_ = true;
     ROS_INFO_STREAM("LocLO initialized from INS pose xyz="
-                    << init_pose.translation().transpose());
+                    << latest_ins_pose_->translation().transpose());
 }
 
 void LocLO::PublishInsTrajectory(const nav_msgs::Odometry &odom) {
@@ -197,28 +238,100 @@ void LocLO::PublishInsTrajectory(const nav_msgs::Odometry &odom) {
     ins_traj_publisher_.publish(ins_path_msg_);
 }
 
-void LocLO::LoadAndPublishGlobalMap() {
-    pcl::PointCloud<pcl::PointXYZI> cloud;
-    ROS_INFO_STREAM("Loading RViz global map: " << map_path_);
-    if (pcl::io::loadPCDFile(map_path_, cloud) != 0) {
-        ROS_ERROR_STREAM("Failed to load RViz global map: " << map_path_);
-        return;
+bool LocLO::LoadGlobalMapIfNeeded(const std::optional<Eigen::Vector3d> &crop_center) {
+    if (global_map_loaded_) return true;
+
+    pcl::PointCloud<pcl::PointXYZI> cloud_i;
+    ROS_INFO_STREAM("Loading global map for init/RViz: " << map_path_
+                    << ", crop_radius=" << init_map_crop_radius_
+                    << (crop_center ? ", crop_center=" + std::to_string(crop_center->x()) + "," +
+                                          std::to_string(crop_center->y())
+                                    : ", crop_center=none"));
+    if (pcl::io::loadPCDFile(map_path_, cloud_i) != 0) {
+        ROS_ERROR_STREAM("Failed to load global map: " << map_path_);
+        return false;
     }
 
-    std::vector<Eigen::Vector3d> points;
-    points.reserve(cloud.points.size());
-    for (const auto &pt : cloud.points) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr raw_map(new pcl::PointCloud<pcl::PointXYZ>);
+    raw_map->reserve(cloud_i.points.size());
+    const bool crop_enabled = crop_center && init_map_crop_radius_ > 0.0;
+    const double crop_radius2 = init_map_crop_radius_ * init_map_crop_radius_;
+    size_t finite_point_count = 0;
+    for (const auto &pt : cloud_i.points) {
         if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z)) continue;
-        points.emplace_back(pt.x, pt.y, pt.z);
+        ++finite_point_count;
+        if (crop_enabled) {
+            const double dx = static_cast<double>(pt.x) - crop_center->x();
+            const double dy = static_cast<double>(pt.y) - crop_center->y();
+            if (dx * dx + dy * dy > crop_radius2) continue;
+        }
+        raw_map->push_back(pcl::PointXYZ(pt.x, pt.y, pt.z));
+    }
+    raw_map->width = static_cast<uint32_t>(raw_map->size());
+    raw_map->height = 1;
+    raw_map->is_dense = false;
+
+    pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+    voxel_filter.setInputCloud(raw_map);
+    voxel_filter.setLeafSize(init_ndt_map_voxel_size_,
+                             init_ndt_map_voxel_size_,
+                             init_ndt_map_voxel_size_);
+    voxel_filter.filter(*ndt_target_map_);
+    const size_t cropped_point_count = raw_map->size();
+    raw_map.reset();
+
+    global_map_points_.clear();
+    if (publish_global_map_) {
+        global_map_points_.reserve(ndt_target_map_->size());
+    }
+
+    global_map_voxel_.emplace(config_.voxel_size,
+                              config_.max_range,
+                              std::numeric_limits<double>::max(),
+                              config_.planarity_threshold,
+                              config_.max_points_per_voxel);
+    constexpr size_t chunk_size = 200000;
+    std::vector<Eigen::Vector3d> chunk;
+    chunk.reserve(chunk_size);
+    for (const auto &point : ndt_target_map_->points) {
+        const Eigen::Vector3d eigen_point(point.x, point.y, point.z);
+        if (publish_global_map_) {
+            global_map_points_.emplace_back(eigen_point);
+        }
+        chunk.emplace_back(eigen_point);
+        if (chunk.size() >= chunk_size) {
+            global_map_voxel_->AddPoints(chunk);
+            chunk.clear();
+        }
+    }
+    if (!chunk.empty()) global_map_voxel_->AddPoints(chunk);
+
+    global_map_loaded_ = cropped_point_count > 0 && !global_map_voxel_->Empty() && !ndt_target_map_->empty();
+    if (global_map_loaded_) {
+        global_map_crop_center_ = crop_center;
+    }
+    ROS_INFO_STREAM("Global map loaded. finite points=" << finite_point_count
+                    << ", cropped points=" << cropped_point_count
+                    << ", init map points=" << ndt_target_map_->size()
+                    << ", voxel map points=" << global_map_voxel_->PointCount()
+                    << ", voxel cells=" << global_map_voxel_->VoxelCount()
+                    << ", map voxel leaf=" << init_ndt_map_voxel_size_
+                    << ", crop_radius=" << init_map_crop_radius_);
+    return global_map_loaded_;
+}
+
+void LocLO::LoadAndPublishGlobalMap() {
+    if (!LoadGlobalMapIfNeeded(global_map_crop_center_)) {
+        return;
     }
 
     std_msgs::Header header;
     // 使用 0 时间戳作为静态地图，避免 rosbag /clock 下 RViz 因时间窗口丢显示。
     header.stamp = ros::Time(0);
     header.frame_id = global_map_frame_;
-    global_map_msg_ = *EigenToPointCloud2(points, header);
+    global_map_msg_ = *EigenToPointCloud2(global_map_points_, header);
     global_map_publisher_.publish(*global_map_msg_);
-    ROS_INFO_STREAM("Published RViz global map points: " << points.size()
+    ROS_INFO_STREAM("Published RViz global map points: " << global_map_points_.size()
                     << ", frame: " << global_map_frame_);
 }
 
@@ -227,6 +340,148 @@ void LocLO::PublishGlobalMap(const ros::TimerEvent &) {
         global_map_msg_->header.stamp = ros::Time(0);
         global_map_publisher_.publish(*global_map_msg_);
     }
+}
+
+std::tuple<Sophus::SE3d, double, size_t, size_t> LocLO::FineAlignInitialPose(
+    const std::vector<Eigen::Vector3d> &source,
+    const Sophus::SE3d &initial_guess) const {
+    genz_icp::Registration registration(config_.max_num_iterations, config_.convergence_criterion);
+    registration.SetTerminalStatusEnabled(false);
+    const auto &[pose, planar_points, non_planar_points] =
+        registration.RegisterFrame(source,
+                                   *global_map_voxel_,
+                                   initial_guess,
+                                   init_max_correspondence_distance_,
+                                   init_kernel_);
+    const size_t correspondences = planar_points.size() + non_planar_points.size();
+    const double score = source.empty() ? 0.0 : static_cast<double>(correspondences) / static_cast<double>(source.size());
+    return {pose, score, correspondences, source.size()};
+}
+
+Eigen::Matrix4f LocLO::SophusToMatrix4f(const Sophus::SE3d &pose) const {
+    return pose.matrix().cast<float>();
+}
+
+Sophus::SE3d LocLO::Matrix4fToSophus(const Eigen::Matrix4f &matrix) const {
+    Eigen::Matrix3d rotation = matrix.block<3, 3>(0, 0).cast<double>();
+    Eigen::Quaterniond quat(rotation);
+    quat.normalize();
+    return Sophus::SE3d(quat, matrix.block<3, 1>(0, 3).cast<double>());
+}
+
+std::optional<Sophus::SE3d> LocLO::CoarseAlignWithNdt(const std::vector<Eigen::Vector3d> &source,
+                                                      const Sophus::SE3d &initial_guess) const {
+    if (!global_map_loaded_ || ndt_target_map_->empty()) return std::nullopt;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr source_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+    source_cloud->reserve(source.size());
+    for (const auto &point : source) {
+        source_cloud->push_back(pcl::PointXYZ(point.x(), point.y(), point.z()));
+    }
+    source_cloud->width = static_cast<uint32_t>(source_cloud->size());
+    source_cloud->height = 1;
+    source_cloud->is_dense = false;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr source_filtered(new pcl::PointCloud<pcl::PointXYZ>());
+    pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
+    voxel_filter.setInputCloud(source_cloud);
+    voxel_filter.setLeafSize(init_ndt_source_voxel_size_,
+                             init_ndt_source_voxel_size_,
+                             init_ndt_source_voxel_size_);
+    voxel_filter.filter(*source_filtered);
+
+    if (source_filtered->empty()) return std::nullopt;
+
+    pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt;
+    ndt.setTransformationEpsilon(init_ndt_transformation_epsilon_);
+    ndt.setStepSize(init_ndt_step_size_);
+    ndt.setResolution(init_ndt_resolution_);
+    ndt.setMaximumIterations(init_ndt_max_iterations_);
+    ndt.setInputSource(source_filtered);
+    ndt.setInputTarget(ndt_target_map_);
+
+    pcl::PointCloud<pcl::PointXYZ> aligned;
+    ndt.align(aligned, SophusToMatrix4f(initial_guess));
+    const double fitness = ndt.getFitnessScore();
+    ROS_INFO_STREAM("Init NDT coarse align: converged=" << ndt.hasConverged()
+                    << ", fitness=" << fitness
+                    << ", source=" << source_filtered->size());
+    if (!ndt.hasConverged() || !std::isfinite(fitness) || fitness > init_ndt_max_fitness_score_) {
+        return std::nullopt;
+    }
+    return Matrix4fToSophus(ndt.getFinalTransformation());
+}
+
+bool LocLO::InitializeFromMatchedPose(const sensor_msgs::PointCloud2::ConstPtr &msg,
+                                      const std::vector<Eigen::Vector3d> &points) {
+    if (!latest_ins_pose_) {
+        ROS_WARN_THROTTLE(2.0, "Waiting for INS pose before refined initialization");
+        return false;
+    }
+    if (!LoadGlobalMapIfNeeded(latest_ins_pose_->translation())) {
+        ROS_WARN("Refined init requested but global map is unavailable. Falling back to raw INS pose.");
+        odometry_.SetInitialPose(*latest_ins_pose_);
+        initialized_from_ins_ = true;
+        return true;
+    }
+    if (publish_global_map_ && !global_map_msg_) {
+        LoadAndPublishGlobalMap();
+    }
+
+    const auto cropped = genz_icp::Preprocess(points, config_.max_range, config_.min_range);
+    const auto source = genz_icp::VoxelDownsample(cropped, init_scan_voxel_size_);
+    if (source.empty()) {
+        ROS_WARN("First cloud has no valid points after preprocessing; cannot initialize LO yet.");
+        return false;
+    }
+
+    const auto [fine_pose, fine_score, fine_corr, fine_source] =
+        FineAlignInitialPose(source, *latest_ins_pose_);
+    ROS_INFO_STREAM("Init fine align from INS: score=" << fine_score
+                    << ", corr=" << fine_corr << "/" << fine_source);
+
+    Sophus::SE3d init_pose = fine_pose;
+    bool accepted = fine_score >= init_fine_score_threshold_ &&
+                    fine_corr >= static_cast<size_t>(init_min_correspondences_);
+    std::string method = "INS + GenZ fine";
+
+    if (!accepted && init_use_ndt_fallback_) {
+        ROS_WARN_STREAM("Init fine score is low. Trying NDT coarse fallback. score="
+                        << fine_score << ", threshold=" << init_fine_score_threshold_
+                        << ", corr=" << fine_corr);
+        const auto ndt_pose = CoarseAlignWithNdt(source, *latest_ins_pose_);
+        if (ndt_pose) {
+            const auto [refined_pose, refined_score, refined_corr, refined_source] =
+                FineAlignInitialPose(source, *ndt_pose);
+            ROS_INFO_STREAM("Init fine align after NDT: score=" << refined_score
+                            << ", corr=" << refined_corr << "/" << refined_source);
+            if (refined_score >= init_fine_score_threshold_ &&
+                refined_corr >= static_cast<size_t>(init_min_correspondences_)) {
+                init_pose = refined_pose;
+                accepted = true;
+                method = "NDT coarse + GenZ fine";
+            } else {
+                init_pose = refined_pose;
+                method = "NDT coarse + GenZ fine, low score fallback";
+            }
+        } else {
+            method = "raw INS fallback, NDT failed";
+            init_pose = *latest_ins_pose_;
+        }
+    } else if (!accepted) {
+        method = "raw INS fallback, fine score low and NDT disabled";
+        init_pose = *latest_ins_pose_;
+    }
+
+    odometry_.SetInitialPose(init_pose);
+    path_msg_.poses.clear();
+    path_msg_.header.frame_id = odom_frame_;
+    initialized_from_ins_ = true;
+    ROS_INFO_STREAM("LocLO initialized by " << method
+                    << ", accepted=" << accepted
+                    << ", xyz=" << init_pose.translation().transpose()
+                    << ", cloud stamp=" << msg->header.stamp.toSec());
+    return true;
 }
 
 Sophus::SE3d LocLO::LookupTransform(const std::string &target_frame,
@@ -255,14 +510,20 @@ Sophus::SE3d LocLO::LookupTransform(const std::string &target_frame,
 }
 
 void LocLO::RegisterFrame(const sensor_msgs::PointCloud2::ConstPtr &msg) {
-    if (use_ins_init_ && !initialized_from_ins_) {
-        ROS_WARN_THROTTLE(2.0, "Waiting for INS init before processing point clouds");
-        return;
-    }
     // 记录当前点云的坐标系，例如 lidar、base_link。
     const auto cloud_frame_id = msg->header.frame_id;
     // 把 ROS 点云消息转成 Eigen 点数组，供 GenZ-ICP 处理。
     const auto points = PointCloud2ToEigen(msg);
+
+    if (use_ins_init_ && !initialized_from_ins_) {
+        if (refine_ins_init_) {
+            if (!InitializeFromMatchedPose(msg, points)) return;
+        } else {
+            ROS_WARN_THROTTLE(2.0, "Waiting for INS init before processing point clouds");
+            return;
+        }
+    }
+
     // 根据 deskew 参数决定是否读取每个点的相对时间戳。
     const auto timestamps = [&]() -> std::vector<double> {
         // 不启用 deskew 时返回空数组，算法会跳过运动补偿。

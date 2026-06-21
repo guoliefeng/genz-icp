@@ -24,6 +24,7 @@
 
 // GenZ-ICP
 #include "genz_icp/pipeline/GenZICP.hpp"
+#include "genz_icp/core/VoxelHashMap.hpp"
 
 #include <optional>
 #include <string>
@@ -37,6 +38,8 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
 
 namespace genz_icp_ros {
 
@@ -73,11 +76,33 @@ private:
     /// 读取 PCD 全局地图，仅用于 RViz 显示，不参与 LO 匹配。
     void LoadAndPublishGlobalMap();
 
+    /// 确保全局 PCD 地图已加载；精配准初始化和 RViz 显示共用同一份地图。
+    bool LoadGlobalMapIfNeeded(const std::optional<Eigen::Vector3d> &crop_center = std::nullopt);
+
     /// 定时重发全局地图，避免 RViz 晚启动或显示临时丢失。
     void PublishGlobalMap(const ros::TimerEvent &event);
 
+    /// 使用 INS/NDT + GenZ-ICP 对首帧点云做初始化配准。
+    bool InitializeFromMatchedPose(const sensor_msgs::PointCloud2::ConstPtr &msg,
+                                   const std::vector<Eigen::Vector3d> &points);
+
+    /// 用 GenZ-ICP 在全局地图上做精配准，并返回匹配比例作为质量分数。
+    std::tuple<Sophus::SE3d, double, size_t, size_t> FineAlignInitialPose(
+        const std::vector<Eigen::Vector3d> &source,
+        const Sophus::SE3d &initial_guess) const;
+
+    /// 用 NDT 在全局地图上做粗配准。
+    std::optional<Sophus::SE3d> CoarseAlignWithNdt(const std::vector<Eigen::Vector3d> &source,
+                                                   const Sophus::SE3d &initial_guess) const;
+
     /// 把 ROS Odometry 转成 Sophus SE3。
     Sophus::SE3d OdomToSophus(const nav_msgs::Odometry &odom) const;
+
+    /// 把 Sophus SE3 转成 PCL/NDT 使用的 4x4 float 矩阵。
+    Eigen::Matrix4f SophusToMatrix4f(const Sophus::SE3d &pose) const;
+
+    /// 把 PCL/NDT 输出的 4x4 float 矩阵转成 Sophus SE3。
+    Sophus::SE3d Matrix4fToSophus(const Eigen::Matrix4f &matrix) const;
 
     /// 公共命名空间 NodeHandle，用于订阅普通话题。
     ros::NodeHandle nh_;
@@ -100,6 +125,36 @@ private:
     bool use_ins_init_{true};
     /// 是否已经用 INS 初始化 GenZ-ICP。
     bool initialized_from_ins_{false};
+    /// 是否用全局地图精配准修正首帧 INS 初值。
+    bool refine_ins_init_{true};
+    /// 精配准分数阈值；分数为有效对应点数/source 点数，越高越可信。
+    double init_fine_score_threshold_{0.35};
+    /// 精配准最少对应点数。
+    int init_min_correspondences_{300};
+    /// 初始化精配准当前帧下采样体素。
+    double init_scan_voxel_size_{0.6};
+    /// 初始化精配准最大对应距离。
+    double init_max_correspondence_distance_{2.0};
+    /// 初始化精配准鲁棒核。
+    double init_kernel_{0.7};
+    /// 初始化全局地图裁剪半径；>0 时以首帧 INS xy 为中心裁剪，<=0 时使用整张下采样地图。
+    double init_map_crop_radius_{160.0};
+    /// NDT 粗配准开关；精配准分数低时才触发。
+    bool init_use_ndt_fallback_{true};
+    /// NDT source 下采样体素。
+    double init_ndt_source_voxel_size_{1.0};
+    /// NDT map 下采样体素。
+    double init_ndt_map_voxel_size_{1.0};
+    /// NDT 分辨率。
+    double init_ndt_resolution_{2.0};
+    /// NDT 最大迭代次数。
+    int init_ndt_max_iterations_{35};
+    /// NDT transformation epsilon。
+    double init_ndt_transformation_epsilon_{0.01};
+    /// NDT step size。
+    double init_ndt_step_size_{0.1};
+    /// NDT 最大可接受 fitness score；越小越好。
+    double init_ndt_max_fitness_score_{3.0};
     /// 是否发布全局 PCD 地图用于 RViz 参考。
     bool publish_global_map_{false};
     /// 全局地图路径；只用于显示。
@@ -138,6 +193,18 @@ private:
     nav_msgs::Path ins_path_msg_;
     /// 缓存后的全局地图消息。
     std::optional<sensor_msgs::PointCloud2> global_map_msg_;
+    /// 全局地图 Eigen 点；仅在 RViz 发布全局地图时缓存，避免初始化调试时多占一份大地图内存。
+    std::vector<Eigen::Vector3d> global_map_points_;
+    /// 全局地图体素哈希，用于 GenZ-ICP 精配准初始化。
+    std::optional<genz_icp::VoxelHashMap> global_map_voxel_;
+    /// NDT 使用的下采样全局地图。
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ndt_target_map_{new pcl::PointCloud<pcl::PointXYZ>};
+    /// 全局地图是否已经成功加载。
+    bool global_map_loaded_{false};
+    /// 当前初始化地图的裁剪中心；用于日志和避免重复加载。
+    std::optional<Eigen::Vector3d> global_map_crop_center_;
+    /// 最近收到的 INS 位姿；精配准初始化会用它作为第一候选初值。
+    std::optional<Sophus::SE3d> latest_ins_pose_;
 
     /// GenZ-ICP 原始里程计流水线对象。
     genz_icp::pipeline::GenZICP odometry_;
