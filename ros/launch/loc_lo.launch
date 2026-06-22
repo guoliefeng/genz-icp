@@ -18,9 +18,9 @@
 
   <!-- RViz 参考全局地图：只显示，不参与 LO 匹配。 -->
   <arg name="publish_global_map" default="true"/>
-  <arg name="map_path" default="/home/guoli/data/yangpu/loc/map.pcd"/>
+  <arg name="map_path" default="/home/guoli/data/yangpu/loc/global_downsampled_0.5.pcd"/>
   <arg name="global_map_frame" default="map"/>
-  <arg name="global_map_publish_period" default="20.0"/>
+  <arg name="global_map_publish_period" default="15.0"/>
 
   <!-- 初始化配准参数：GenZ-ICP 精配准分数高则直接使用，分数低则 NDT 粗配准后再精配准。 -->
   <arg name="init_fine_score_threshold" default="0.35"/>
@@ -43,7 +43,7 @@
 
   <!-- 可选录评估 bag；默认只录 LO odometry 和 INS，不录点云，方便 evo 评估且体积较小。 -->
   <arg name="record" default="true"/>
-  <arg name="record_bag" default="/home/guoli/data/yangpu/loc/loc_lo_eval.bag"/>
+  <arg name="record_bag" default="/home/guoli/data/yangpu/loc/loc_lo_eval0621.bag"/>
 
   <node pkg="genz_icp" type="loc_lo_node" name="loc_lo_node" output="screen">
     <remap from="pointcloud_topic" to="$(arg topic)"/>

@@ -1,32 +1,29 @@
 # LocLO 资源占用测试报告
 
-测试日期：2026-06-20  
-测试对象：`loc_lo_node`  
+首次测试日期：2026-06-20
+
+隔离复测日期：2026-06-21
+
+测试对象：`loc_lo_node`
+
 测试数据：`/home/guoli/data/yangpu/loc/merged_bag.bag`
+
+面向方案汇报的精简结论、算法边界、改进方向和第二定位源集成设计，见 [LocLO算法分析与集成方案.md](LocLO算法分析与集成方案.md)。
 
 ## 1. 测试目的
 
-本次测试用于评估 `Loc_LO.cpp` 在纯 LO 模式下的资源占用情况。测试时关闭 RViz、调试点云、全局地图显示和录包，尽量只观察算法节点本身的 CPU、内存、IO 和输出频率。
+本次测试用于评估 `Loc_LO.cpp` 在纯 LO 模式下的资源占用情况。隔离复测时关闭 RViz、调试点云、外部全局地图显示、全局地图精匹配、TF 发布和录包；`pidstat` 只绑定 `loc_lo_node` 的 PID，避免把 `rosbag play` 的 CPU 计入节点结果。
 
 ## 2. 测试配置
 
 启动配置等价于：
 
 ```bash
-roslaunch genz_icp loc_lo.launch \
-  rviz:=false \
-  visualize:=false \
-  publish_global_map:=false \
-  record:=false
-```
-
-实际运行时为了避免当前终端环境中 `roslaunch` 日志检查/输出阶段卡住，使用了：
-
-```bash
 roslaunch --skip-log-check genz_icp loc_lo.launch \
-  rviz:=false \
   visualize:=false \
   publish_global_map:=false \
+  refine_ins_init:=false \
+  publish_odom_tf:=false \
   record:=false
 ```
 
@@ -52,8 +49,10 @@ bag 信息：
 | --- | --- |
 | `odom_frame` | `map` |
 | `use_ins_init` | `true` |
+| `refine_ins_init` | `false` |
 | `visualize` | `false` |
 | `publish_global_map` | `false` |
+| `publish_odom_tf` | `false` |
 | `record` | `false` |
 | `config_file` | `outdoor.yaml` |
 | `voxel_size` | `0.6` |
@@ -79,11 +78,22 @@ rostopic hz /genz/odometry
 /tmp/loc_lo_resource_test/rosbag_play.log
 ```
 
+2026-06-21 隔离复测采样文件：
+
+```text
+/tmp/loc_lo_resource_retest_20260621/pidstat_loc_lo.txt
+/tmp/loc_lo_resource_retest_20260621/mpstat_system.txt
+/tmp/loc_lo_resource_retest_20260621/rosparams.yaml
+/tmp/loc_lo_resource_retest_20260621/rosbag_play_time.txt
+```
+
+隔离复测环境：18 个逻辑 CPU；测试前无其他 ROS 算法节点。运行期间只有 ROS master、`rosout`、`loc_lo_node` 和回放数据所必需的 `rosbag play`。CPU/RSS/IO 数值来自 PID `9808`，仅代表 `loc_lo_node`。整机 CPU 另由 `mpstat` 独立记录，用于排查其他进程干扰。
+
 ## 4. 测试结果
 
 ### 4.1 输出频率
 
-`/genz/odometry` 输出频率：
+`/genz/odometry` 输出频率沿用首次测试结果；为满足“只采样算法 PID”的要求，隔离复测没有额外启动 `rostopic hz` 观察节点：
 
 | 指标 | 数值 |
 | --- | --- |
@@ -97,31 +107,56 @@ rostopic hz /genz/odometry
 
 ### 4.2 CPU
 
-全量采样，包括启动和结束阶段：
+2026-06-21 隔离复测全量采样，包括启动和结束的 4 个 0% 样本：
 
 | 指标 | 数值 |
 | --- | --- |
-| 样本数 | 392 |
-| 平均 CPU | 242.71% |
-| 用户态平均 | 210.05% |
-| 系统态平均 | 32.65% |
-| 峰值 CPU | 780.00% |
+| 样本数 | 376 |
+| 平均 CPU | 233.45% |
+| 用户态平均 | 206.30% |
+| 系统态平均 | 27.15% |
+| CPU 中位数 | 229.00% |
+| CPU P95 | 462.75% |
+| CPU P99 | 615.25% |
+| 峰值 CPU | 713.00% |
 
-运行中采样，过滤掉启动/结束阶段的 0% 空闲样本：
+运行中采样，过滤掉 0% 空闲样本：
 
 | 指标 | 数值 |
 | --- | --- |
-| 样本数 | 381 |
-| 平均 CPU | 249.71% |
-| 用户态平均 | 216.12% |
-| 系统态平均 | 33.59% |
-| 峰值 CPU | 780.00% |
+| 样本数 | 372 |
+| 平均 CPU | 235.96% |
+| 用户态平均 | 208.51% |
+| 系统态平均 | 27.44% |
+| CPU 中位数 | 233.00% |
+| CPU P95 | 463.35% |
+| CPU P99 | 615.61% |
+| 峰值 CPU | 713.00% |
+
+整机 CPU 状态：
+
+| 指标 | 数值 |
+| --- | --- |
+| 样本数 | 376 |
+| 平均空闲 CPU | 86.04% |
+| 最低空闲 CPU | 58.69% |
+
+与 2026-06-20 首次测试对比：
+
+| 指标 | 首次测试 | 隔离复测 |
+| --- | ---: | ---: |
+| 运行中平均 CPU | 249.71% | 235.96% |
+| 峰值 CPU | 780.00% | 713.00% |
+
+两次测试都关闭了 `publish_global_map`；本次还明确关闭了 `refine_ins_init`，节点日志只出现 raw INS 初始化，没有 PCD 加载、NDT 或全局地图精匹配日志。因此 700% 以上峰值与外部地图加载无关。
 
 解释：
 
-- 平均 CPU 约 250%，即平均使用约 2.5 个 CPU core。
-- 峰值 780% 表示某些瞬间会用到接近 8 个 core，主要来自 TBB 并行对应点搜索和线性系统构建。
-- 系统态 CPU 约 34%，说明除纯计算外，点云转换、内存分配、ROS 消息处理也有一定开销。
+- 平均 CPU 约 236%，即平均使用约 2.36 个 CPU core。
+- P95 约 463%，多数帧显著低于峰值；713% 是 1 秒采样窗口内的瞬时多核并行。
+- 峰值主要来自 TBB 并行对应点搜索、线性系统构建、体素化和滚动局部地图更新。
+- 这里的“局部地图”是 LO 算法在线维护的核心体素地图，不是外部 PCD 全局地图，不能关闭。
+- 整机平均仍有 86% CPU 空闲，说明复测没有受到其他高负载进程明显干扰。
 
 ### 4.3 内存
 
@@ -129,25 +164,24 @@ rostopic hz /genz/odometry
 
 | 指标 | 数值 |
 | --- | --- |
-| 平均 RSS | 110264 KB，约 107.7 MB |
-| 最小 RSS | 23616 KB，约 23.1 MB |
-| 最大 RSS | 140084 KB，约 136.8 MB |
-| 平均 VSZ | 2733445 KB，约 2.61 GB |
-| 最大 VSZ | 2901660 KB，约 2.77 GB |
+| 平均 RSS | 112901 KB，约 110.3 MB |
+| 最小 RSS | 33696 KB，约 32.9 MB |
+| 最大 RSS | 137964 KB，约 134.7 MB |
+| 最大 VSZ | 2160232 KB，约 2.06 GB |
 
 运行中采样，过滤掉启动初期低 RSS：
 
 | 指标 | 数值 |
 | --- | --- |
-| 平均 RSS | 113237 KB，约 110.6 MB |
-| 最小 RSS | 65232 KB，约 63.7 MB |
-| 最大 RSS | 140084 KB，约 136.8 MB |
+| 平均 RSS | 113192 KB，约 110.5 MB |
+| 最小 RSS | 33696 KB，约 32.9 MB |
+| 最大 RSS | 137964 KB，约 134.7 MB |
 
 解释：
 
-- 实际物理内存 RSS 峰值约 137 MB，不高。
-- VSZ 约 2.7 GB，但这是虚拟地址空间，不等于真实占用；TBB、ROS、动态库和内存分配器都会扩大 VSZ。
-- RSS 从前期约 90 MB 增长到后期约 140 MB，符合 `local_map` 随路线积累后进入滚动清理的行为，没有看到失控增长。
+- 实际物理内存 RSS 峰值约 135 MB，不高，与首次测试约 137 MB 接近。
+- VSZ 峰值约 2.06 GB，但这是虚拟地址空间，不等于真实占用。
+- RSS 随滚动局部地图建立而增长，随后保持有界，没有看到外部 PCD 被加载或内存失控增长。
 
 ### 4.4 IO
 
@@ -155,9 +189,9 @@ rostopic hz /genz/odometry
 
 | 指标 | 数值 |
 | --- | --- |
-| 平均读 | 0.80 KB/s |
+| 平均读 | 0.74 KB/s |
 | 平均写 | 0.00 KB/s |
-| 峰值读 | 260.00 KB/s |
+| 峰值读 | 140.00 KB/s |
 | 峰值写 | 0.00 KB/s |
 
 解释：
@@ -169,11 +203,11 @@ rostopic hz /genz/odometry
 
 | 指标 | 数值 |
 | --- | --- |
-| 墙钟时间 | 6:10.71 |
+| 墙钟时间 | 6:13.50 |
 | CPU | 8% |
-| 最大 RSS | 55980 KB，约 54.7 MB |
-| File system inputs | 16911680 blocks |
-| File system outputs | 34912 blocks |
+| 最大 RSS | 55500 KB，约 54.2 MB |
+| File system inputs | 17227968 blocks |
+| File system outputs | 35576 blocks |
 
 ## 5. 运行现象
 
@@ -185,7 +219,7 @@ LocLO initialized from INS pose xyz=228.174 -48.0891 -0.0468386
 
 2. 点云处理过程中 `/genz/odometry` 基本稳定在 10 Hz 附近。
 
-3. 虽然 launch 中设置了 `visualize:=false`，底层 `Registration` 仍然在终端持续输出 GenZ-ICP 彩色状态条。这些状态条没有大量写入 ROS 日志文件，但会刷 roslaunch 控制台，影响人工查看，也会带来少量 stdout 开销。
+3. 复测日志没有出现外部 PCD 加载、NDT 或 GenZ 全局精匹配，只出现 raw INS 初始化，确认全局地图没有参与测试。
 
 4. ROS 日志目录本次只有约 60 KB，没有出现日志文件爆炸。
 
@@ -195,26 +229,26 @@ LocLO initialized from INS pose xyz=228.174 -48.0891 -0.0468386
 
 资源结论：
 
-- CPU：平均约 2.5 核，瞬时峰值接近 8 核。
-- 内存：RSS 峰值约 137 MB，整体较轻。
+- CPU：运行中平均约 2.36 核，P95 约 4.63 核，1 秒峰值约 7.13 核。
+- 内存：RSS 峰值约 135 MB，整体较轻。
 - IO：节点本身几乎无磁盘 IO。
 - 实时性：`/genz/odometry` 平均 9.935 Hz，基本跟住输入点云。
 
-总体判断：当前配置下资源占用主要瓶颈是 CPU，不是内存或磁盘。CPU 峰值来自 ICP 对应点搜索、TBB 并行构建线性系统、体素地图更新等计算环节。
+总体判断：当前配置下资源占用主要瓶颈是 CPU，不是内存或磁盘。隔离复测证明 700% 以上峰值不是加载外部地图造成的，而是 ICP 对应点搜索、TBB 并行构建线性系统、体素化和局部地图更新产生的短时并行峰值。
 
 ## 7. 建议
 
 ### 7.1 短期建议
 
-1. 关闭底层终端状态条。
+1. 保持关闭底层终端状态条。
 
-当前 `visualize:=false` 并不会关闭 `Registration` 的终端状态输出。建议在 `Loc_LO.cpp` 构造 `odometry_` 后增加：
+当前 `Loc_LO.cpp` 已在构造 `odometry_` 后调用：
 
 ```cpp
 odometry_.SetTerminalStatusEnabled(false);
 ```
 
-这样资源测试和日常运行日志会更干净。
+隔离复测中没有出现 GenZ-ICP 状态条刷屏，应保留该配置。
 
 2. 保持资源测试配置分层。
 
